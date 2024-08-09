@@ -6,6 +6,10 @@ This project provides a Cloudflare Worker and a Ruby CLI script for translating 
 
 The goal of this project is to simplify the process of translating message properties files into multiple languages using a combination of Cloudflare Workers and a Ruby CLI script. This allows for easy and efficient handling of translations directly from your development environment.
 
+## See It In Action
+
+https://translatemessages.pages.dev
+
 ## Cloudflare Worker
 
 ### Deployment Instructions
