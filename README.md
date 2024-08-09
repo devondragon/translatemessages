@@ -8,7 +8,7 @@ The goal of this project is to simplify the process of translating message prope
 
 ## See It In Action
 
-[Demo Site](https://translatemessages.pages.dev){:target="_blank"}
+[Demo Site](https://translatemessages.pages.dev)
 
 ## Cloudflare Worker
 
