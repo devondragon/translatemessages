@@ -3,9 +3,12 @@ require 'uri'
 require 'json'
 require 'fileutils'
 require 'optparse'
+require 'rubygems'
+require 'net/http/post/multipart'
 
-# Define the Worker URL
-WORKER_URL = "https://your-worker-url.workers.dev"
+
+# Define the Worker URL, using an environment variable if set
+WORKER_URL = ENV['WORKER_URL'] || "https://your-worker-url.workers.dev"
 
 # Default languages to translate to
 DEFAULT_LANGUAGES = ["fr", "es", "de"]
@@ -34,15 +37,20 @@ languages = options[:languages] || DEFAULT_LANGUAGES
 def translate_and_download(file, languages)
   languages.each do |language|
 	uri = URI(WORKER_URL)
-	
+	puts "uri #{uri}"
+
 	# Prepare the request
-	request = Net::HTTP::Post::Multipart.new uri.path,
-	  "file" => UploadIO.new(file, "text/plain", file),
+	request = Net::HTTP::Post::Multipart.new uri,
+	  "file" => UploadIO.new(file, "text/plain"),
 	  "language" => language
 
 	puts "Translating to #{language}..."
-	# Perform the request
-	response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
+	# Perform the request with increased read timeout
+	http = Net::HTTP.new(uri.host, uri.port)
+	http.use_ssl = true
+	http.read_timeout = 600 # Increase read timeout to 600 seconds
+
+	response = http.start do |http|
 	  http.request(request)
 	end
 

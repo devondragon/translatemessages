@@ -67,6 +67,8 @@ This command uploads `messages.properties` and requests a translation to French.
   ```bash
   wrangler tail
   ```
+- **403 Errors**:
+  If you configure your Worker to use a Custom Domain, you may encounter 403 errors depending on how Cloudflare is configured to protect that domain. Test with the default Route (which ends in workers.dev) to see if this is the issue.
 
 ## Cloudflare Pages Deployment
 
@@ -145,14 +147,13 @@ The Ruby CLI script automates the interaction with the Cloudflare Worker, allowi
   gem install multipart-post
   ```
 
-
-### Editing the CLI Script
-
-  Replace the `WORKER_URL` in the script with the URL of your Translate Messages Cloudflare Worker.
-
-  You can also edit the `DEFAULT_LANGUAGES` list in the script to include all of the languages you commonly wish to translate to.
-
 ### Usage
+
+If you haven't edited the WORKER_URL in the script itself, you should set an environment variable WORKER_URL pointing to your Worker:
+
+  ```bash
+  export WORKER_URL="https://yourworker.hostname.com"
+  ```
 
 The script provides several options to customize its behavior:
 
@@ -187,6 +188,9 @@ The script provides several options to customize its behavior:
 ### Customization
 
 - **Target Languages**: You can modify the list of default target languages by editing the `DEFAULT_LANGUAGES` array within the script. This allows you to customize which languages the file will be translated into by default.
+
+- **Worker URL**: You can also replace the `WORKER_URL` in the script with the URL of your Translate Messages Cloudflare Worker.
+
 
 ### Example Output
 
