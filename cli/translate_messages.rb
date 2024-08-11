@@ -6,7 +6,6 @@ require 'optparse'
 require 'rubygems'
 require 'net/http/post/multipart'
 
-
 # Define the Worker URL, using an environment variable if set
 WORKER_URL = ENV['WORKER_URL'] || "https://your-worker-url.workers.dev"
 
@@ -35,9 +34,12 @@ languages = options[:languages] || DEFAULT_LANGUAGES
 
 # Upload file and download translated files
 def translate_and_download(file, languages)
+  uri = URI(WORKER_URL)
+  puts "URI: #{uri}"
+
   languages.each do |language|
-	uri = URI(WORKER_URL)
-	puts "uri #{uri}"
+	# Record start time
+	start_time = Time.now
 
 	# Prepare the request
 	request = Net::HTTP::Post::Multipart.new uri,
@@ -45,6 +47,7 @@ def translate_and_download(file, languages)
 	  "language" => language
 
 	puts "Translating to #{language}..."
+
 	# Perform the request with increased read timeout
 	http = Net::HTTP.new(uri.host, uri.port)
 	http.use_ssl = true
@@ -54,13 +57,17 @@ def translate_and_download(file, languages)
 	  http.request(request)
 	end
 
+	# Record end time
+	end_time = Time.now
+	elapsed_time = end_time - start_time
+
 	# Handle the response
 	if response.is_a?(Net::HTTPSuccess)
 	  filename = "messages_#{language}.properties"
 	  File.open(filename, 'w') { |f| f.write(response.body) }
-	  puts "Translated file saved as #{filename}"
+	  puts "Translated file saved as #{filename} (took #{elapsed_time.round(2)} seconds)"
 	else
-	  puts "Failed to translate to #{language}. HTTP Status: #{response.code}"
+	  puts "Failed to translate to #{language}. HTTP Status: #{response.code}. Response: #{response.body} (took #{elapsed_time.round(2)} seconds)"
 	end
   end
 end
