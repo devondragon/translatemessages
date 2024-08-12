@@ -10,6 +10,10 @@ The goal of this project is to simplify the process of translating message prope
 
 [Demo Site](https://translatemessages.pages.dev)
 
+## Valid Languages
+The AI model being used is the m2m100, and you can see the languages supported here: https://huggingface.co/facebook/m2m100_1.2B#languages-covered
+Currently dialects are not supported, such as Brazililan Portugese versus Portugese Portuguse, or the Hong Kong or Tiawanese dialects of Chinese. 
+
 ## Cloudflare Worker
 
 ### Deployment Instructions
