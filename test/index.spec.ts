@@ -163,4 +163,33 @@ describe('TranslateMessages Worker', () => {
 		const body = await response.text();
 		expect(body).toBe("colon:Salut\nspace\tAu revoir\n");
 	});
+
+	it('handles multi-line entries using continuations', async () => {
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ translated_text: 'ok' })
+			.mockResolvedValueOnce({ translated_text: 'Bonjour \u241EMonde' });
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "multi=Hello \\\n  World\n";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'fr');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body).toBe("multi=Bonjour \\\n  Monde\n");
+	});
 });
