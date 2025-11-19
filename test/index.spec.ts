@@ -99,4 +99,68 @@ describe('TranslateMessages Worker', () => {
 		const responseText = await response.text();
 		expect(responseText).toContain("Translation service error");
 	});
+
+	it('normalizes language codes and preserves formatting during translation', async () => {
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ translated_text: 'ok' }) // probe call
+			.mockResolvedValueOnce({ translated_text: 'Bonjour' })
+			.mockResolvedValueOnce({ translated_text: 'Au revoir' });
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "# Heading\r\n\r\n greeting=Hello\r\nfarewell = Goodbye\r\n";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'FR-ca');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body).toBe("# Heading\r\n\r\n greeting=Bonjour\r\nfarewell = Au revoir\r\n");
+		expect(response.headers.get('Content-Disposition')).toContain('messages_fr.properties');
+
+		const targetLangs = mockRun.mock.calls.map(([, args]) => args.target_lang);
+		expect(targetLangs.every((lang) => lang === 'fr')).toBe(true);
+	});
+
+	it('translates entries that use colon or whitespace separators', async () => {
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ translated_text: 'ok' })
+			.mockResolvedValueOnce({ translated_text: 'Salut' })
+			.mockResolvedValueOnce({ translated_text: 'Au revoir' });
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "colon:Hi\nspace\tBye\n";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'fr');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body).toBe("colon:Salut\nspace\tAu revoir\n");
+	});
 });

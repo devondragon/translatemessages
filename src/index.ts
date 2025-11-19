@@ -17,90 +17,72 @@ const SUPPORTED_LANGUAGES = [
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		if (request.method === "POST") {
-			const formData = await request.formData();
-			const file = formData.get("file") as File;
-			const language = formData.get("language") as string;
-
-			if (!file || !language) {
-				return new Response("File and language parameters are required.", { status: 400 });
-			}
-
-			// Check file size (5MB limit)
-			const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
-			if (file.size > MAX_FILE_SIZE) {
-				return new Response("File too large. Maximum size is 5MB.", { status: 413 });
-			}
-
-			// Validate language code
-			const languageCode = language.toLowerCase().split("-")[0]; // Handle cases like "pt-BR"
-			if (!SUPPORTED_LANGUAGES.includes(languageCode)) {
-				return new Response(`Unsupported language code: ${language}. Supported languages: ${SUPPORTED_LANGUAGES.join(", ")}`, { status: 400 });
-			}
-
-			const text = await file.text();
-
-			// Perform a test translation before processing all messages
-			try {
-				const testText = "test"; // Simple test string
-				await translateText(testText, language, env);
-			} catch (error) {
-				return new Response(`Translation service error: ${error instanceof Error ? error.message : 'Unknown error'}`, { status: 500 });
-			}
-
-			const translatedText = await translateMessages(text, language, env);
-
-			const languageSuffix = language.toLowerCase().split("-")[0];
-			const filename = `messages_${languageSuffix}.properties`;
-
-			return new Response(translatedText, {
-				headers: {
-					"Content-Disposition": `attachment; filename="${filename}"`,
-					"Content-Type": "text/plain"
-				}
-			});
-		} else {
+		if (request.method !== "POST") {
 			return new Response("Invalid request method. Use POST.", { status: 405 });
 		}
+
+		const formData = await request.formData();
+		const file = formData.get("file") as File;
+		const language = formData.get("language") as string;
+
+		if (!file || !language) {
+			return new Response("File and language parameters are required.", { status: 400 });
+		}
+
+		// Check file size (5MB limit)
+		const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+		if (file.size > MAX_FILE_SIZE) {
+			return new Response("File too large. Maximum size is 5MB.", { status: 413 });
+		}
+
+		// Normalize and validate language code
+		const normalizedLanguage = language.toLowerCase();
+		const languageCode = normalizedLanguage.split("-")[0]; // Handle cases like "pt-BR"
+		if (!SUPPORTED_LANGUAGES.includes(languageCode)) {
+			return new Response(`Unsupported language code: ${language}. Supported languages: ${SUPPORTED_LANGUAGES.join(", ")}`, { status: 400 });
+		}
+
+		const text = await file.text();
+
+		// Perform a test translation before processing all messages
+		try {
+			const testText = "test"; // Simple test string
+			await translateText(testText, languageCode, env);
+		} catch (error) {
+			return new Response(`Translation service error: ${error instanceof Error ? error.message : 'Unknown error'}`, { status: 500 });
+		}
+
+		const translatedText = await translateMessages(text, languageCode, env);
+
+		const filename = `messages_${languageCode}.properties`;
+
+		return new Response(translatedText, {
+			headers: {
+				"Content-Disposition": `attachment; filename="${filename}"`,
+				"Content-Type": "text/plain"
+			}
+		});
 	},
 };
 
 async function translateMessages(text: string, targetLanguage: string, env: Env): Promise<string> {
-	const messages = text.split("\n").filter(line => line && !line.startsWith("#"));
+	const newline = text.includes("\r\n") ? "\r\n" : "\n";
+	const normalizedText = text.replace(/\r\n?/g, "\n");
+	const lines = normalizedText.split("\n");
+	const translatedLines = [...lines];
 	const BATCH_SIZE = 100; // Process up to 100 translations concurrently
-	const results: string[] = [];
 
-	// Process messages in batches to avoid overwhelming the AI service
-	for (let i = 0; i < messages.length; i += BATCH_SIZE) {
-		const batch = messages.slice(i, i + BATCH_SIZE);
-		
-		// Map each message to a promise that resolves to the translated message
-		const translationPromises = batch.map(async (message) => {
-			const equalIndex = message.indexOf("=");
-			if (equalIndex === -1) {
-				// Skip lines without = sign
-				return message;
-			}
-			
-			const key = message.substring(0, equalIndex);
-			const value = message.substring(equalIndex + 1);
-			
-			try {
-				const translatedValue = await translateText(value, targetLanguage, env);
-				return `${key}= ${translatedValue}`;
-			} catch (error) {
-				// If translation fails for this line, keep original
-				console.error(`Failed to translate key "${key}":`, error);
-				return message;
-			}
-		});
-
-		// Process batch concurrently
+	for (let i = 0; i < lines.length; i += BATCH_SIZE) {
+		const batch = lines.slice(i, i + BATCH_SIZE);
+		const translationPromises = batch.map((line) => translateLine(line, targetLanguage, env));
 		const batchResults = await Promise.all(translationPromises);
-		results.push(...batchResults);
+		for (let j = 0; j < batchResults.length; j++) {
+			translatedLines[i + j] = batchResults[j];
+		}
 	}
 
-	return results.join("\n");
+	const joined = translatedLines.join("\n");
+	return newline === "\n" ? joined : joined.replace(/\n/g, newline);
 }
 
 async function translateText(text: string, targetLanguage: string, env: Env): Promise<string> {
@@ -120,3 +102,113 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 		throw new Error(`Translation service failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
 	}
 }
+
+	async function translateLine(line: string, targetLanguage: string, env: Env): Promise<string> {
+		const trimmedLine = line.trim();
+	
+		// Preserve blank lines and comments (starting with # or !)
+		if (!trimmedLine || trimmedLine.startsWith("#") || trimmedLine.startsWith("!")) {
+			return line;
+		}
+	
+		const separatorIndex = findSeparatorIndex(line);
+		if (!separatorIndex) {
+			return line;
+		}
+	
+		const { index, isWhitespace } = separatorIndex;
+		let valueStart = isWhitespace ? index : index + 1;
+	
+		while (valueStart < line.length && /\s/.test(line[valueStart])) {
+			valueStart++;
+		}
+	
+		const prefix = line.slice(0, valueStart);
+		const valueAndTrailing = line.slice(valueStart);
+		const match = valueAndTrailing.match(/^(.*?)(\s*)$/);
+	
+		if (!match) {
+			return line;
+		}
+	
+		const [, rawValue, trailingWhitespace] = match;
+		if (!rawValue) {
+			return line;
+		}
+	
+		try {
+			const translatedValue = await translateText(rawValue, targetLanguage, env);
+			return `${prefix}${translatedValue}${trailingWhitespace}`;
+		} catch (error) {
+			console.error(`Failed to translate line "${line}":`, error);
+			return line;
+		}
+	}
+	
+	function findSeparatorIndex(line: string): { index: number; isWhitespace: boolean } | null {
+		const symbolIndex = findFirstSymbolSeparator(line);
+		if (symbolIndex !== null) {
+			return { index: symbolIndex, isWhitespace: false };
+		}
+	
+		const whitespaceIndex = findFirstWhitespaceSeparator(line);
+		return whitespaceIndex !== null ? { index: whitespaceIndex, isWhitespace: true } : null;
+	}
+	
+	function findFirstSymbolSeparator(line: string): number | null {
+		let escaped = false;
+		let sawNonWhitespace = false;
+	
+		for (let i = 0; i < line.length; i++) {
+			const char = line[i];
+	
+			if (!escaped && (char === " " || char === "\t" || char === "\f")) {
+				if (sawNonWhitespace) {
+					continue;
+				}
+				continue;
+			}
+	
+			if (!escaped && (char === "=" || char === ":")) {
+				return i;
+			}
+	
+			if (char === "\\" && !escaped) {
+				escaped = true;
+				sawNonWhitespace = true;
+				continue;
+			}
+	
+			escaped = false;
+			sawNonWhitespace = true;
+		}
+	
+		return null;
+	}
+	
+	function findFirstWhitespaceSeparator(line: string): number | null {
+		let escaped = false;
+		let sawNonWhitespace = false;
+	
+		for (let i = 0; i < line.length; i++) {
+			const char = line[i];
+	
+			if (!escaped && (char === " " || char === "\t" || char === "\f")) {
+				if (sawNonWhitespace) {
+					return i;
+				}
+				continue;
+			}
+	
+			if (char === "\\" && !escaped) {
+				escaped = true;
+				sawNonWhitespace = true;
+				continue;
+			}
+	
+			escaped = false;
+			sawNonWhitespace = true;
+		}
+	
+		return null;
+	}
