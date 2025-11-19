@@ -7,7 +7,7 @@ Cloudflare Worker code lives in `src/index.ts`, which exports the single `fetch`
 - `npm run dev` / `npm start` — boot Wrangler’s local worker preview with auto-reload.
 - `npm test` — execute Vitest specs with the Cloudflare Workers pool; keep suites deterministic because mocks share the same event loop.
 - `npm run deploy` — publish the worker defined in `wrangler.toml`.
-- `npm run cf-typegen` — refresh generated bindings after you edit durable objects, KV, or AI bindings.
+- `npm run cf-typegen` — refresh generated bindings after you edit Durable Objects, KV, or AI bindings.
 - `ruby cli/translate_messages.rb -f messages.properties -l fr,es` — exercise the worker end-to-end from the CLI.
 
 ## Coding Style & Naming Conventions
