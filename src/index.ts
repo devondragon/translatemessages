@@ -4,6 +4,17 @@ export interface Env {
 	AI: Ai;
 }
 
+interface Segment {
+	prefix: string;
+	value: string;
+	suffix: string;
+}
+
+interface PlaceholderToken {
+	marker: string;
+	original: string;
+}
+
 // Supported language codes for m2m100 model
 const SUPPORTED_LANGUAGES = [
 	"af", "am", "ar", "ast", "az", "ba", "be", "bg", "bn", "br", "bs", "ca", "ceb", "cs", "cy", "da", 
@@ -162,18 +173,7 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 		return lines;
 	}
 }
-	
-interface Segment {
-	prefix: string;
-	value: string;
-	suffix: string;
-}
 
-interface PlaceholderToken {
-	marker: string;
-	original: string;
-}
-	
 function parseFirstLine(line: string): Segment | null {
 	const separatorIndex = findSeparatorIndex(line);
 	if (!separatorIndex) {
