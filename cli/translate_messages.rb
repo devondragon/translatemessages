@@ -38,8 +38,8 @@ def translate_and_download(file, languages)
   puts "URI: #{uri}"
 
   if uri.scheme.nil?
-	puts "Invalid WORKER_URL '#{WORKER_URL}'. Include http:// or https://."
-	return
+  puts "Invalid WORKER_URL '#{WORKER_URL}'. Include http:// or https://."
+  return
   end
 
   languages.each do |language|
