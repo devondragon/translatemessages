@@ -192,4 +192,33 @@ describe('TranslateMessages Worker', () => {
 		const body = await response.text();
 		expect(body).toBe("multi=Bonjour \\\n  Monde\n");
 	});
+
+	it('unescapes and re-escapes property values during translation', async () => {
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ translated_text: 'ok' })
+			.mockResolvedValueOnce({ translated_text: 'Salut monde!\u00E9\tLigne\\Cassé' });
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "special=Hello\\ World\\!\\u00E9\\tLine\\\\Break\n";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'fr');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body).toBe("special=Salut monde\\!\\u00e9\\tLigne\\\\Cass\\u00e9\n");
+	});
 });

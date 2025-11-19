@@ -130,15 +130,17 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 			segments.push(segment);
 		}
 	
-		if (segments.every(segment => !segment.value)) {
+		const unescapedValues = segments.map(segment => unescapePropertiesText(segment.value));
+	
+		if (unescapedValues.every(value => value === "")) {
 			return lines;
 		}
 	
-		if (segments.some(segment => segment.value.includes(SEGMENT_DELIMITER))) {
+		if (unescapedValues.some(value => value.includes(SEGMENT_DELIMITER))) {
 			return lines;
 		}
 	
-		const combinedValue = segments.map(segment => segment.value).join(SEGMENT_DELIMITER);
+		const combinedValue = unescapedValues.join(SEGMENT_DELIMITER);
 	
 		try {
 			const translatedCombined = await translateText(combinedValue, targetLanguage, env);
@@ -148,7 +150,10 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 				return lines;
 			}
 	
-			return segments.map((segment, idx) => `${segment.prefix}${translatedSegments[idx]}${segment.suffix}`);
+			return segments.map((segment, idx) => {
+				const escapedValue = escapePropertiesText(translatedSegments[idx]);
+				return `${segment.prefix}${escapedValue}${segment.suffix}`;
+			});
 		} catch (error) {
 			console.error("Failed to translate entry:", error);
 			return lines;
@@ -324,26 +329,117 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 	function findFirstWhitespaceSeparator(line: string): number | null {
 		let escaped = false;
 		let sawNonWhitespace = false;
-	
+
 		for (let i = 0; i < line.length; i++) {
 			const char = line[i];
-	
+
 			if (!escaped && (char === " " || char === "\t" || char === "\f")) {
 				if (sawNonWhitespace) {
 					return i;
 				}
 				continue;
 			}
-	
+
 			if (char === "\\" && !escaped) {
 				escaped = true;
 				sawNonWhitespace = true;
 				continue;
 			}
-	
+
 			escaped = false;
 			sawNonWhitespace = true;
 		}
-	
+
 		return null;
+	}
+
+	function unescapePropertiesText(value: string): string {
+		let result = "";
+
+		for (let i = 0; i < value.length; i++) {
+			const char = value[i];
+
+			if (char !== "\\") {
+				result += char;
+				continue;
+			}
+
+			if (i === value.length - 1) {
+				result += "\\";
+				break;
+			}
+
+			i++;
+			const nextChar = value[i];
+
+			switch (nextChar) {
+				case "t":
+					result += "\t";
+					break;
+				case "r":
+					result += "\r";
+					break;
+				case "n":
+					result += "\n";
+					break;
+				case "f":
+					result += "\f";
+					break;
+				case "u": {
+					const hex = value.slice(i + 1, i + 5);
+					if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+						result += String.fromCharCode(parseInt(hex, 16));
+						i += 4;
+					} else {
+						result += "\\u";
+					}
+					break;
+				}
+				default:
+					result += nextChar;
+					break;
+			}
+		}
+
+		return result;
+	}
+
+	function escapePropertiesText(value: string): string {
+		let result = "";
+
+		for (const char of value) {
+			switch (char) {
+				case "\\":
+					result += "\\\\";
+					break;
+				case "\t":
+					result += "\\t";
+					break;
+				case "\r":
+					result += "\\r";
+					break;
+				case "\n":
+					result += "\\n";
+					break;
+				case "\f":
+					result += "\\f";
+					break;
+				case "=":
+				case ":":
+				case "#":
+				case "!":
+					result += `\\${char}`;
+					break;
+				default: {
+					const code = char.charCodeAt(0);
+					if (code < 0x20 || code > 0x7e) {
+						result += `\\u${code.toString(16).padStart(4, "0")}`;
+					} else {
+						result += char;
+					}
+				}
+			}
+		}
+
+		return result;
 	}
