@@ -221,4 +221,33 @@ describe('TranslateMessages Worker', () => {
 		const body = await response.text();
 		expect(body).toBe("special=Salut monde\\!\\u00e9\\tLigne\\\\Cass\\u00e9\n");
 	});
+
+	it('preserves inline comments appended to values', async () => {
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ translated_text: 'ok' })
+			.mockResolvedValueOnce({ translated_text: 'Bonjour' });
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "commented=Hello  # note for translators\n";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'fr');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body).toBe("commented=Bonjour  # note for translators\n");
+	});
 });

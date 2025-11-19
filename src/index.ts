@@ -213,31 +213,59 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 			return { value: "", suffix: "" };
 		}
 	
-		const match = valuePortion.match(/^(.*?)(\s*)$/);
-		const baseValue = match ? match[1] : valuePortion;
+		const { content, inlineComment } = splitInlineComment(valuePortion);
+		const match = content.match(/^(.*?)(\s*)$/);
+		const baseValue = match ? match[1] : content;
 		const trailingWhitespace = match ? match[2] : "";
 		const { chunk, continuationSuffix } = stripContinuation(baseValue);
 	
 		return {
 			value: chunk,
-			suffix: `${trailingWhitespace}${continuationSuffix}`,
+			suffix: `${trailingWhitespace}${continuationSuffix}${inlineComment}`,
 		};
 	}
 	
 	function stripContinuation(value: string): { chunk: string; continuationSuffix: string } {
 		let backslashCount = 0;
-	
+
 		for (let i = value.length - 1; i >= 0 && value[i] === "\\"; i--) {
 			backslashCount++;
 		}
-	
+
 		if (backslashCount % 2 === 1) {
 			const remainingBackslashes = Math.max(0, backslashCount - 1);
 			const chunk = value.slice(0, value.length - backslashCount) + "\\".repeat(remainingBackslashes);
 			return { chunk, continuationSuffix: "\\" };
 		}
-	
+
 		return { chunk: value, continuationSuffix: "" };
+	}
+
+	function splitInlineComment(valuePortion: string): { content: string; inlineComment: string } {
+		let escaped = false;
+
+		for (let i = 0; i < valuePortion.length; i++) {
+			const char = valuePortion[i];
+
+			if (!escaped && (char === "#" || char === "!")) {
+				const prevChar = i === 0 ? "" : valuePortion[i - 1];
+				if (i === 0 || /\s/.test(prevChar)) {
+					return {
+						content: valuePortion.slice(0, i),
+						inlineComment: valuePortion.slice(i),
+					};
+				}
+			}
+
+			if (char === "\\" && !escaped) {
+				escaped = true;
+				continue;
+			}
+
+			escaped = false;
+		}
+
+		return { content: valuePortion, inlineComment: "" };
 	}
 	
 	const SEGMENT_DELIMITER = "\u241E";
