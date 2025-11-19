@@ -140,7 +140,9 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 			return lines;
 		}
 	
-		const combinedValue = unescapedValues.join(SEGMENT_DELIMITER);
+		const placeholderCounter = { current: 0 };
+		const maskedSegments = unescapedValues.map(value => maskPlaceholders(value, placeholderCounter));
+		const combinedValue = maskedSegments.map(segment => segment.text).join(SEGMENT_DELIMITER);
 	
 		try {
 			const translatedCombined = await translateText(combinedValue, targetLanguage, env);
@@ -151,7 +153,8 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 			}
 	
 			return segments.map((segment, idx) => {
-				const escapedValue = escapePropertiesText(translatedSegments[idx]);
+				const restoredPlaceholders = restorePlaceholders(translatedSegments[idx], maskedSegments[idx].tokens);
+				const escapedValue = escapePropertiesText(restoredPlaceholders);
 				return `${segment.prefix}${escapedValue}${segment.suffix}`;
 			});
 		} catch (error) {
@@ -164,6 +167,11 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 		prefix: string;
 		value: string;
 		suffix: string;
+	}
+	
+	interface PlaceholderToken {
+		marker: string;
+		original: string;
 	}
 	
 	function parseFirstLine(line: string): Segment | null {
@@ -269,7 +277,8 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 	}
 	
 	const SEGMENT_DELIMITER = "\u241E";
-	
+	const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]*\$?[-+#0-9.]*[a-zA-Z]/g;
+
 	function buildEntries(lines: string[]): Array<{ indexes: number[] }> {
 		const entries: Array<{ indexes: number[] }> = [];
 		let i = 0;
@@ -470,4 +479,25 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 		}
 
 		return result;
+	}
+
+	function maskPlaceholders(value: string, counter: { current: number }): { text: string; tokens: PlaceholderToken[] } {
+		const tokens: PlaceholderToken[] = [];
+		const text = value.replace(PLACEHOLDER_REGEX, (match) => {
+			const marker = `__PH_${counter.current++}__`;
+			tokens.push({ marker, original: match });
+			return marker;
+		});
+
+		return { text, tokens };
+	}
+
+	function restorePlaceholders(text: string, tokens: PlaceholderToken[]): string {
+		let restored = text;
+
+		for (const token of tokens) {
+			restored = restored.split(token.marker).join(token.original);
+		}
+
+		return restored;
 	}

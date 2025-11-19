@@ -250,4 +250,33 @@ describe('TranslateMessages Worker', () => {
 		const body = await response.text();
 		expect(body).toBe("commented=Bonjour  # note for translators\n");
 	});
+
+	it('protects placeholder tokens during translation', async () => {
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ translated_text: 'ok' })
+			.mockResolvedValueOnce({ translated_text: 'Salut __PH_0__! __PH_1__ __PH_2__' });
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "placeholder=Hello {0}! %s ${name}\n";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'fr');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body).toBe("placeholder=Salut {0}\\! %s ${name}\n");
+	});
 });
