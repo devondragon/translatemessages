@@ -37,6 +37,11 @@ def translate_and_download(file, languages)
   uri = URI(WORKER_URL)
   puts "URI: #{uri}"
 
+  if uri.scheme.nil?
+  puts "Invalid WORKER_URL '#{WORKER_URL}'. Include http:// or https://."
+  return
+  end
+
   languages.each do |language|
 	# Record start time
 	start_time = Time.now
@@ -49,8 +54,9 @@ def translate_and_download(file, languages)
 	puts "Translating to #{language}..."
 
 	# Perform the request with increased read timeout
-	http = Net::HTTP.new(uri.host, uri.port)
-	http.use_ssl = true
+	port = uri.port || (uri.scheme == 'https' ? 443 : 80)
+	http = Net::HTTP.new(uri.host, port)
+	http.use_ssl = uri.scheme == 'https'
 	http.read_timeout = 600 # Increase read timeout to 600 seconds
 
 	response = http.start do |http|

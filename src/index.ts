@@ -4,6 +4,17 @@ export interface Env {
 	AI: Ai;
 }
 
+interface Segment {
+	prefix: string;
+	value: string;
+	suffix: string;
+}
+
+interface PlaceholderToken {
+	marker: string;
+	original: string;
+}
+
 // Supported language codes for m2m100 model
 const SUPPORTED_LANGUAGES = [
 	"af", "am", "ar", "ast", "az", "ba", "be", "bg", "bn", "br", "bs", "ca", "ceb", "cs", "cy", "da", 
@@ -15,92 +26,87 @@ const SUPPORTED_LANGUAGES = [
 	"yi", "yo", "zh", "zu"
 ];
 
+// Delimiter used to separate segments in multi-line properties
+const SEGMENT_DELIMITER = "\u241E";
+
+// Pattern to match placeholders in property values
+const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]*\$?[-+#0-9.]*[a-zA-Z]/g;
+
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		if (request.method === "POST") {
-			const formData = await request.formData();
-			const file = formData.get("file") as File;
-			const language = formData.get("language") as string;
-
-			if (!file || !language) {
-				return new Response("File and language parameters are required.", { status: 400 });
-			}
-
-			// Check file size (5MB limit)
-			const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
-			if (file.size > MAX_FILE_SIZE) {
-				return new Response("File too large. Maximum size is 5MB.", { status: 413 });
-			}
-
-			// Validate language code
-			const languageCode = language.toLowerCase().split("-")[0]; // Handle cases like "pt-BR"
-			if (!SUPPORTED_LANGUAGES.includes(languageCode)) {
-				return new Response(`Unsupported language code: ${language}. Supported languages: ${SUPPORTED_LANGUAGES.join(", ")}`, { status: 400 });
-			}
-
-			const text = await file.text();
-
-			// Perform a test translation before processing all messages
-			try {
-				const testText = "test"; // Simple test string
-				await translateText(testText, language, env);
-			} catch (error) {
-				return new Response(`Translation service error: ${error instanceof Error ? error.message : 'Unknown error'}`, { status: 500 });
-			}
-
-			const translatedText = await translateMessages(text, language, env);
-
-			const languageSuffix = language.toLowerCase().split("-")[0];
-			const filename = `messages_${languageSuffix}.properties`;
-
-			return new Response(translatedText, {
-				headers: {
-					"Content-Disposition": `attachment; filename="${filename}"`,
-					"Content-Type": "text/plain"
-				}
-			});
-		} else {
+		if (request.method !== "POST") {
 			return new Response("Invalid request method. Use POST.", { status: 405 });
 		}
+
+		const formData = await request.formData();
+		const file = formData.get("file") as File;
+		const language = formData.get("language") as string;
+
+		if (!file || !language) {
+			return new Response("File and language parameters are required.", { status: 400 });
+		}
+
+		// Check file size (5MB limit)
+		const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+		if (file.size > MAX_FILE_SIZE) {
+			return new Response("File too large. Maximum size is 5MB.", { status: 413 });
+		}
+
+		// Normalize and validate language code
+		const normalizedLanguage = language.toLowerCase();
+		const languageCode = normalizedLanguage.split("-")[0]; // Handle cases like "pt-BR"
+		if (!SUPPORTED_LANGUAGES.includes(languageCode)) {
+			return new Response(`Unsupported language code: ${language}. Supported languages: ${SUPPORTED_LANGUAGES.join(", ")}`, { status: 400 });
+		}
+
+		const text = await file.text();
+
+		// Perform a test translation before processing all messages
+		try {
+			const testText = "test"; // Simple test string
+			await translateText(testText, languageCode, env);
+		} catch (error) {
+			return new Response(`Translation service error: ${error instanceof Error ? error.message : 'Unknown error'}`, { status: 500 });
+		}
+
+		const translatedText = await translateMessages(text, languageCode, env);
+
+		const filename = `messages_${languageCode}.properties`;
+
+		return new Response(translatedText, {
+			headers: {
+				"Content-Disposition": `attachment; filename="${filename}"`,
+				"Content-Type": "text/plain"
+			}
+		});
 	},
 };
 
 async function translateMessages(text: string, targetLanguage: string, env: Env): Promise<string> {
-	const messages = text.split("\n").filter(line => line && !line.startsWith("#"));
+	const newline = text.includes("\r\n") ? "\r\n" : "\n";
+	const normalizedText = text.replace(/\r\n?/g, "\n");
+	const lines = normalizedText.split("\n");
+	const translatedLines = [...lines];
+	const entries = buildEntries(lines);
 	const BATCH_SIZE = 100; // Process up to 100 translations concurrently
-	const results: string[] = [];
 
-	// Process messages in batches to avoid overwhelming the AI service
-	for (let i = 0; i < messages.length; i += BATCH_SIZE) {
-		const batch = messages.slice(i, i + BATCH_SIZE);
-		
-		// Map each message to a promise that resolves to the translated message
-		const translationPromises = batch.map(async (message) => {
-			const equalIndex = message.indexOf("=");
-			if (equalIndex === -1) {
-				// Skip lines without = sign
-				return message;
-			}
-			
-			const key = message.substring(0, equalIndex);
-			const value = message.substring(equalIndex + 1);
-			
-			try {
-				const translatedValue = await translateText(value, targetLanguage, env);
-				return `${key}= ${translatedValue}`;
-			} catch (error) {
-				// If translation fails for this line, keep original
-				console.error(`Failed to translate key "${key}":`, error);
-				return message;
-			}
+	for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+		const batch = entries.slice(i, i + BATCH_SIZE);
+		const translationPromises = batch.map(async (entry) => {
+			const entryLines = entry.indexes.map((idx) => lines[idx]);
+			const translatedEntryLines = await translateEntry(entryLines, targetLanguage, env);
+			return { entry, translatedEntryLines };
 		});
-
-		// Process batch concurrently
 		const batchResults = await Promise.all(translationPromises);
-		results.push(...batchResults);
+		for (const { entry, translatedEntryLines } of batchResults) {
+			entry.indexes.forEach((lineIndex, idx) => {
+				translatedLines[lineIndex] = translatedEntryLines[idx];
+			});
+		}
 	}
 
-	return results.join("\n");
+	const joined = translatedLines.join("\n");
+	return newline === "\n" ? joined : joined.replace(/\n/g, newline);
 }
 
 async function translateText(text: string, targetLanguage: string, env: Env): Promise<string> {
@@ -119,4 +125,382 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 		console.error("Translation API error: ", error);
 		throw new Error(`Translation service failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
 	}
+}
+
+async function translateEntry(lines: string[], targetLanguage: string, env: Env): Promise<string[]> {
+	const firstLine = lines[0];
+	const trimmedFirstLine = firstLine.trim();
+
+	if (!trimmedFirstLine || trimmedFirstLine.startsWith("#") || trimmedFirstLine.startsWith("!")) {
+		return lines;
+	}
+
+	const segments: Segment[] = [];
+	const firstSegment = parseFirstLine(firstLine);
+	if (!firstSegment) {
+		return lines;
+	}
+	segments.push(firstSegment);
+
+	for (let i = 1; i < lines.length; i++) {
+		const segment = parseContinuationLine(lines[i]);
+		segments.push(segment);
+	}
+
+	const unescapedValues = segments.map(segment => unescapePropertiesText(segment.value));
+
+	if (unescapedValues.every(value => value === "")) {
+		return lines;
+	}
+
+	if (unescapedValues.some(value => value.includes(SEGMENT_DELIMITER))) {
+		return lines;
+	}
+
+	const placeholderCounter = { current: 0 };
+	const maskedSegments = unescapedValues.map(value => maskPlaceholders(value, placeholderCounter));
+	const combinedValue = maskedSegments.map(segment => segment.text).join(SEGMENT_DELIMITER);
+
+	try {
+		const translatedCombined = await translateText(combinedValue, targetLanguage, env);
+		const translatedSegments = translatedCombined.split(SEGMENT_DELIMITER);
+
+		if (translatedSegments.length !== segments.length) {
+			return lines;
+		}
+
+		return segments.map((segment, idx) => {
+			const restoredPlaceholders = restorePlaceholders(translatedSegments[idx], maskedSegments[idx].tokens);
+			const escapedValue = escapePropertiesText(restoredPlaceholders);
+			return `${segment.prefix}${escapedValue}${segment.suffix}`;
+		});
+	} catch (error) {
+		console.error("Failed to translate entry:", error);
+		return lines;
+	}
+}
+
+function parseFirstLine(line: string): Segment | null {
+	const separatorIndex = findSeparatorIndex(line);
+	if (!separatorIndex) {
+		return null;
+	}
+
+	const { index, isWhitespace } = separatorIndex;
+	let valueStart = isWhitespace ? index : index + 1;
+
+	while (valueStart < line.length && /\s/.test(line[valueStart])) {
+		valueStart++;
+	}
+
+	const prefix = line.slice(0, valueStart);
+	const valuePortion = line.slice(valueStart);
+	const { value, suffix } = extractValueAndSuffix(valuePortion);
+
+	return {
+		prefix,
+		value,
+		suffix,
+	};
+}
+	
+function parseContinuationLine(line: string): Segment {
+	let valueStart = 0;
+
+	while (valueStart < line.length && /\s/.test(line[valueStart])) {
+		valueStart++;
+	}
+
+	const prefix = line.slice(0, valueStart);
+	const valuePortion = line.slice(valueStart);
+	const { value, suffix } = extractValueAndSuffix(valuePortion);
+
+	return {
+		prefix,
+		value,
+		suffix,
+	};
+}
+	
+function extractValueAndSuffix(valuePortion: string): { value: string; suffix: string } {
+	if (!valuePortion) {
+		return { value: "", suffix: "" };
+	}
+
+	const { content, inlineComment } = splitInlineComment(valuePortion);
+	const match = content.match(/^(.*?)(\s*)$/);
+	const baseValue = match ? match[1] : content;
+	const trailingWhitespace = match ? match[2] : "";
+	const { chunk, continuationSuffix } = stripContinuation(baseValue);
+
+	return {
+		value: chunk,
+		suffix: `${trailingWhitespace}${continuationSuffix}${inlineComment}`,
+	};
+}
+	
+function stripContinuation(value: string): { chunk: string; continuationSuffix: string } {
+	let backslashCount = 0;
+
+	for (let i = value.length - 1; i >= 0 && value[i] === "\\"; i--) {
+		backslashCount++;
+	}
+
+	if (backslashCount % 2 === 1) {
+		const remainingBackslashes = Math.max(0, backslashCount - 1);
+		const chunk = value.slice(0, value.length - backslashCount) + "\\".repeat(remainingBackslashes);
+		return { chunk, continuationSuffix: "\\" };
+	}
+
+	return { chunk: value, continuationSuffix: "" };
+}
+
+function splitInlineComment(valuePortion: string): { content: string; inlineComment: string } {
+	let escaped = false;
+
+	for (let i = 0; i < valuePortion.length; i++) {
+		const char = valuePortion[i];
+
+		if (!escaped && (char === "#" || char === "!")) {
+			const prevChar = i === 0 ? "" : valuePortion[i - 1];
+			if (i === 0 || /\s/.test(prevChar)) {
+				return {
+					content: valuePortion.slice(0, i),
+					inlineComment: valuePortion.slice(i),
+				};
+			}
+		}
+
+		if (char === "\\" && !escaped) {
+			escaped = true;
+			continue;
+		}
+
+		escaped = false;
+	}
+
+	return { content: valuePortion, inlineComment: "" };
+}
+
+function buildEntries(lines: string[]): Array<{ indexes: number[] }> {
+	const entries: Array<{ indexes: number[] }> = [];
+	let i = 0;
+
+	while (i < lines.length) {
+		const line = lines[i];
+		const trimmed = line.trim();
+
+		if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("!")) {
+			entries.push({ indexes: [i] });
+			i++;
+			continue;
+		}
+
+		const indexes = [i];
+		while (lineHasContinuation(lines[indexes[indexes.length - 1]]) && indexes[indexes.length - 1] + 1 < lines.length) {
+			const nextIndex = indexes[indexes.length - 1] + 1;
+			indexes.push(nextIndex);
+		}
+
+		entries.push({ indexes });
+		i = indexes[indexes.length - 1] + 1;
+	}
+
+	return entries;
+}
+	
+function lineHasContinuation(line: string): boolean {
+	let idx = line.length - 1;
+
+	while (idx >= 0 && (line[idx] === " " || line[idx] === "\t" || line[idx] === "\f")) {
+		idx--;
+	}
+
+	let backslashCount = 0;
+	while (idx >= 0 && line[idx] === "\\") {
+		backslashCount++;
+		idx--;
+	}
+
+	return backslashCount % 2 === 1;
+}
+	
+function findSeparatorIndex(line: string): { index: number; isWhitespace: boolean } | null {
+	const symbolIndex = findFirstSymbolSeparator(line);
+	if (symbolIndex !== null) {
+		return { index: symbolIndex, isWhitespace: false };
+	}
+
+	const whitespaceIndex = findFirstWhitespaceSeparator(line);
+	return whitespaceIndex !== null ? { index: whitespaceIndex, isWhitespace: true } : null;
+}
+	
+function findFirstSymbolSeparator(line: string): number | null {
+	let escaped = false;
+	let sawNonWhitespace = false;
+
+	for (let i = 0; i < line.length; i++) {
+		const char = line[i];
+
+		if (!escaped && (char === " " || char === "\t" || char === "\f")) {
+			if (sawNonWhitespace) {
+				continue;
+			}
+			continue;
+		}
+
+		if (!escaped && (char === "=" || char === ":")) {
+			return i;
+		}
+
+		if (char === "\\" && !escaped) {
+			escaped = true;
+			sawNonWhitespace = true;
+			continue;
+		}
+
+		escaped = false;
+		sawNonWhitespace = true;
+	}
+
+	return null;
+}
+	
+function findFirstWhitespaceSeparator(line: string): number | null {
+	let escaped = false;
+	let sawNonWhitespace = false;
+
+	for (let i = 0; i < line.length; i++) {
+		const char = line[i];
+
+		if (!escaped && (char === " " || char === "\t" || char === "\f")) {
+			if (sawNonWhitespace) {
+				return i;
+			}
+			continue;
+		}
+
+		if (char === "\\" && !escaped) {
+			escaped = true;
+			sawNonWhitespace = true;
+			continue;
+		}
+
+		escaped = false;
+		sawNonWhitespace = true;
+	}
+
+	return null;
+}
+
+function unescapePropertiesText(value: string): string {
+	let result = "";
+
+	for (let i = 0; i < value.length; i++) {
+		const char = value[i];
+
+		if (char !== "\\") {
+			result += char;
+			continue;
+		}
+
+		if (i === value.length - 1) {
+			result += "\\";
+			break;
+		}
+
+		i++;
+		const nextChar = value[i];
+
+		switch (nextChar) {
+			case "t":
+				result += "\t";
+				break;
+			case "r":
+				result += "\r";
+				break;
+			case "n":
+				result += "\n";
+				break;
+			case "f":
+				result += "\f";
+				break;
+			case "u": {
+				const hex = value.slice(i + 1, i + 5);
+				if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+					result += String.fromCharCode(parseInt(hex, 16));
+					i += 4;
+				} else {
+					result += "\\u";
+				}
+				break;
+			}
+			default:
+				result += nextChar;
+				break;
+		}
+	}
+
+	return result;
+}
+
+function escapePropertiesText(value: string): string {
+	let result = "";
+
+	for (const char of value) {
+		switch (char) {
+			case "\\":
+				result += "\\\\";
+				break;
+			case "\t":
+				result += "\\t";
+				break;
+			case "\r":
+				result += "\\r";
+				break;
+			case "\n":
+				result += "\\n";
+				break;
+			case "\f":
+				result += "\\f";
+				break;
+			case "=":
+			case ":":
+			case "#":
+			case "!":
+				result += `\\${char}`;
+				break;
+			default: {
+				const code = char.charCodeAt(0);
+				if (code < 0x20 || code > 0x7e) {
+					result += `\\u${code.toString(16).padStart(4, "0")}`;
+				} else {
+					result += char;
+				}
+			}
+		}
+	}
+
+	return result;
+}
+
+function maskPlaceholders(value: string, counter: { current: number }): { text: string; tokens: PlaceholderToken[] } {
+	const tokens: PlaceholderToken[] = [];
+	const text = value.replace(PLACEHOLDER_REGEX, (match) => {
+		const marker = `__PH_${counter.current++}__`;
+		tokens.push({ marker, original: match });
+		return marker;
+	});
+
+	return { text, tokens };
+}
+
+function restorePlaceholders(text: string, tokens: PlaceholderToken[]): string {
+	let restored = text;
+
+	for (const token of tokens) {
+		restored = restored.split(token.marker).join(token.original);
+	}
+
+	return restored;
 }
