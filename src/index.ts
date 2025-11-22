@@ -15,6 +15,12 @@ const SUPPORTED_LANGUAGES = [
 	"yi", "yo", "zh", "zu"
 ];
 
+// Delimiter used to separate segments in multi-line properties
+const SEGMENT_DELIMITER = "\u241E";
+
+// Pattern to match placeholders in property values
+const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]*\$?[-+#0-9.]*[a-zA-Z]/g;
+
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		if (request.method !== "POST") {
@@ -275,9 +281,6 @@ function splitInlineComment(valuePortion: string): { content: string; inlineComm
 
 	return { content: valuePortion, inlineComment: "" };
 }
-	
-const SEGMENT_DELIMITER = "\u241E";
-const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]*\$?[-+#0-9.]*[a-zA-Z]/g;
 
 function buildEntries(lines: string[]): Array<{ indexes: number[] }> {
 	const entries: Array<{ indexes: number[] }> = [];
