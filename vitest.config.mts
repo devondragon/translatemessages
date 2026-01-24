@@ -4,7 +4,8 @@ export default defineWorkersConfig({
 	test: {
 		poolOptions: {
 			workers: {
-				wrangler: { configPath: './wrangler.toml' },
+				// Use test config without AI binding to avoid remote mode in CI
+				wrangler: { configPath: './wrangler.test.toml' },
 			},
 		},
 	},

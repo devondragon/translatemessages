@@ -1,0 +1,6 @@
+#:schema node_modules/wrangler/config-schema.json
+# Test configuration - no AI binding to avoid remote mode in CI
+name = "translatemessages-test"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
