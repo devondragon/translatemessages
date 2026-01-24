@@ -42,10 +42,15 @@ This command will open a browser window for you to authenticate your Cloudflare 
 Once everything is set up, you can deploy your Worker to Cloudflare.
 
   ```bash
-  wrangler publish
+  wrangler deploy
   ```
 
   This command will bundle your project and deploy it to Cloudflare Workers. Wrangler will provide you with a URL where your Worker is hosted.
+
+  To deploy to the staging environment:
+  ```bash
+  wrangler deploy --env staging
+  ```
 
 #### 3. Testing the Worker
 
@@ -60,6 +65,15 @@ curl -X POST -F "file=@messages.properties" -F "language=fr" https://your-worker
 ```
 
 This command uploads `messages.properties` and requests a translation to French. The Worker responds with a translated file.
+
+### Continuous Integration
+
+This project includes a GitHub Actions CI workflow (`.github/workflows/ci.yml`) that:
+- Runs type checking with TypeScript
+- Executes the test suite
+- Optionally deploys to staging on push to main
+
+To enable automatic staging deployments, add a `CLOUDFLARE_API_TOKEN` secret to your GitHub repository.
 
 ### Troubleshooting
 
