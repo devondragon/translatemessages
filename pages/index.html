@@ -3,133 +3,745 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Translate Messages File</title>
+	<title>TranslateMessages — i18n for Spring Boot</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
 	<style>
-		body {
-			font-family: Arial, sans-serif;
-			background-color: #f4f4f9;
-			color: #333;
+		:root {
+			--bg-deep: #0a0a0b;
+			--bg-surface: #121214;
+			--bg-elevated: #1a1a1d;
+			--bg-hover: #222226;
+			--border-subtle: #2a2a2e;
+			--border-focus: #3d3d42;
+			--text-primary: #fafafa;
+			--text-secondary: #a1a1a6;
+			--text-muted: #636366;
+			--accent: #f97316;
+			--accent-hover: #fb923c;
+			--accent-glow: rgba(249, 115, 22, 0.15);
+			--success: #22c55e;
+			--success-bg: rgba(34, 197, 94, 0.1);
+			--warning: #eab308;
+			--warning-bg: rgba(234, 179, 8, 0.1);
+			--error: #ef4444;
+			--error-bg: rgba(239, 68, 68, 0.08);
+			--font-mono: 'JetBrains Mono', ui-monospace, monospace;
+			--font-serif: 'Instrument Serif', Georgia, serif;
+			--ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+			--ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+		}
+
+		* {
 			margin: 0;
 			padding: 0;
+			box-sizing: border-box;
+		}
+
+		html {
+			font-size: 16px;
+			-webkit-font-smoothing: antialiased;
+			-moz-osx-font-smoothing: grayscale;
+		}
+
+		body {
+			font-family: var(--font-mono);
+			background: var(--bg-deep);
+			color: var(--text-primary);
+			min-height: 100vh;
 			display: flex;
-			justify-content: center;
+			flex-direction: column;
+			overflow-x: hidden;
+		}
+
+		/* Ambient background effect */
+		.ambient {
+			position: fixed;
+			inset: 0;
+			pointer-events: none;
+			overflow: hidden;
+			z-index: 0;
+		}
+
+		.ambient::before {
+			content: '';
+			position: absolute;
+			top: -50%;
+			left: -50%;
+			width: 200%;
+			height: 200%;
+			background:
+				radial-gradient(ellipse 600px 400px at 20% 30%, rgba(249, 115, 22, 0.03) 0%, transparent 50%),
+				radial-gradient(ellipse 500px 500px at 80% 70%, rgba(249, 115, 22, 0.02) 0%, transparent 50%);
+			animation: ambientDrift 20s ease-in-out infinite alternate;
+		}
+
+		@keyframes ambientDrift {
+			0% { transform: translate(0, 0) rotate(0deg); }
+			100% { transform: translate(-5%, 5%) rotate(3deg); }
+		}
+
+		/* Grid pattern overlay */
+		.grid-pattern {
+			position: fixed;
+			inset: 0;
+			pointer-events: none;
+			z-index: 0;
+			opacity: 0.03;
+			background-image:
+				linear-gradient(var(--text-muted) 1px, transparent 1px),
+				linear-gradient(90deg, var(--text-muted) 1px, transparent 1px);
+			background-size: 60px 60px;
+		}
+
+		/* Header */
+		header {
+			position: relative;
+			z-index: 10;
+			padding: 2rem 2rem 0;
+		}
+
+		.logo {
+			display: flex;
 			align-items: center;
-			height: 100vh;
+			gap: 0.75rem;
+			text-decoration: none;
+			color: inherit;
 		}
 
-		.container {
-			background-color: #fff;
-			padding: 2em;
+		.logo-mark {
+			width: 32px;
+			height: 32px;
+			background: linear-gradient(135deg, var(--accent) 0%, #ea580c 100%);
 			border-radius: 8px;
-			box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-			max-width: 400px;
-			width: 100%;
-			box-sizing: border-box;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			font-size: 1rem;
+			font-weight: 600;
 		}
 
-		h1 {
+		.logo-text {
+			font-size: 0.875rem;
+			font-weight: 500;
+			letter-spacing: -0.01em;
+			color: var(--text-secondary);
+		}
+
+		/* Main content */
+		main {
+			position: relative;
+			z-index: 10;
+			flex: 1;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			padding: 3rem 1.5rem;
+		}
+
+		.hero {
 			text-align: center;
-			color: #0078D4;
+			margin-bottom: 3rem;
+			max-width: 600px;
+			animation: fadeUp 0.8s var(--ease-out-expo) both;
 		}
 
-		label {
-			display: block;
-			margin-bottom: 0.5em;
-			font-weight: bold;
+		@keyframes fadeUp {
+			from {
+				opacity: 0;
+				transform: translateY(20px);
+			}
+			to {
+				opacity: 1;
+				transform: translateY(0);
+			}
 		}
 
-		input[type="file"],
-		input[type="text"] {
-			width: 100%;
-			padding: 0.75em;
-			margin-bottom: 1.5em;
-			border: 1px solid #ccc;
+		.hero h1 {
+			font-family: var(--font-serif);
+			font-size: clamp(2.5rem, 6vw, 3.5rem);
+			font-weight: 400;
+			font-style: italic;
+			line-height: 1.1;
+			margin-bottom: 1rem;
+			letter-spacing: -0.02em;
+		}
+
+		.hero h1 span {
+			color: var(--accent);
+		}
+
+		.hero p {
+			font-size: 0.9375rem;
+			color: var(--text-secondary);
+			line-height: 1.6;
+		}
+
+		.hero code {
+			background: var(--bg-elevated);
+			padding: 0.15em 0.4em;
 			border-radius: 4px;
-			box-sizing: border-box;
-			font-size: 1em;
+			font-size: 0.875em;
+			color: var(--text-primary);
 		}
 
-		button {
+		/* Card container */
+		.card {
+			background: var(--bg-surface);
+			border: 1px solid var(--border-subtle);
+			border-radius: 16px;
+			padding: 2rem;
 			width: 100%;
-			padding: 0.75em;
-			background-color: #0078D4;
-			color: white;
-			border: none;
-			border-radius: 4px;
-			font-size: 1em;
+			max-width: 480px;
+			animation: fadeUp 0.8s var(--ease-out-expo) 0.1s both;
+		}
+
+		/* Drop zone */
+		.drop-zone {
+			position: relative;
+			border: 2px dashed var(--border-subtle);
+			border-radius: 12px;
+			padding: 2.5rem 1.5rem;
+			text-align: center;
 			cursor: pointer;
-			transition: background-color 0.3s ease;
+			transition: all 0.3s var(--ease-out-expo);
+			margin-bottom: 1.5rem;
+			background: var(--bg-deep);
+			overflow: hidden;
 		}
 
-		button:hover {
-			background-color: #005bb5;
+		.drop-zone::before {
+			content: '';
+			position: absolute;
+			inset: 0;
+			background: var(--accent-glow);
+			opacity: 0;
+			transition: opacity 0.3s ease;
 		}
 
-		button:focus {
-			outline: 2px solid #005bb5;
-			outline-offset: 2px;
+		.drop-zone:hover,
+		.drop-zone.drag-over {
+			border-color: var(--accent);
+			background: var(--bg-elevated);
 		}
 
-		@media (max-width: 400px) {
-			.container {
-				padding: 1.5em;
-			}
-
-			h1 {
-				font-size: 1.5em;
-			}
-
-			input[type="file"],
-			input[type="text"],
-			button {
-				font-size: 0.9em;
-			}
+		.drop-zone:hover::before,
+		.drop-zone.drag-over::before {
+			opacity: 1;
 		}
 
-		button.loading {
-			background-color: #005bb5;
-			opacity: 0.7;
-			cursor: not-allowed;
+		.drop-zone.has-file {
+			border-color: var(--success);
+			border-style: solid;
 		}
 
-		.error-message {
-			background-color: #fef2f2;
-			border: 1px solid #fecaca;
-			color: #991b1b;
-			padding: 0.75em;
-			border-radius: 4px;
-			margin-bottom: 1em;
-			font-size: 0.9em;
+		.drop-zone.has-file::before {
+			background: var(--success-bg);
+			opacity: 1;
 		}
 
-		.error-message[hidden] {
+		.drop-zone input[type="file"] {
+			position: absolute;
+			inset: 0;
+			width: 100%;
+			height: 100%;
+			opacity: 0;
+			cursor: pointer;
+		}
+
+		.drop-zone-content {
+			position: relative;
+			z-index: 1;
+			pointer-events: none;
+		}
+
+		.drop-icon {
+			width: 48px;
+			height: 48px;
+			margin: 0 auto 1rem;
+			border-radius: 12px;
+			background: var(--bg-elevated);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			transition: all 0.3s var(--ease-spring);
+		}
+
+		.drop-zone:hover .drop-icon,
+		.drop-zone.drag-over .drop-icon {
+			transform: scale(1.05);
+			background: var(--bg-hover);
+		}
+
+		.drop-zone.has-file .drop-icon {
+			background: var(--success-bg);
+		}
+
+		.drop-icon svg {
+			width: 24px;
+			height: 24px;
+			color: var(--text-muted);
+			transition: color 0.3s ease;
+		}
+
+		.drop-zone:hover .drop-icon svg,
+		.drop-zone.drag-over .drop-icon svg {
+			color: var(--accent);
+		}
+
+		.drop-zone.has-file .drop-icon svg {
+			color: var(--success);
+		}
+
+		.drop-zone-label {
+			font-size: 0.9375rem;
+			color: var(--text-primary);
+			margin-bottom: 0.375rem;
+		}
+
+		.drop-zone-hint {
+			font-size: 0.8125rem;
+			color: var(--text-muted);
+		}
+
+		.file-name {
+			display: none;
+			font-size: 0.875rem;
+			color: var(--success);
+			margin-top: 0.5rem;
+			font-weight: 500;
+		}
+
+		.drop-zone.has-file .file-name {
+			display: block;
+		}
+
+		.drop-zone.has-file .drop-zone-hint {
 			display: none;
 		}
 
-		.hint {
-			font-size: 0.85em;
-			color: #666;
-			margin-top: -1em;
-			margin-bottom: 1.5em;
+		/* Language selector */
+		.field-group {
+			margin-bottom: 1.5rem;
+		}
+
+		.field-label {
+			display: block;
+			font-size: 0.8125rem;
+			font-weight: 500;
+			color: var(--text-secondary);
+			margin-bottom: 0.5rem;
+			text-transform: uppercase;
+			letter-spacing: 0.05em;
+		}
+
+		.language-grid {
+			display: grid;
+			grid-template-columns: repeat(4, 1fr);
+			gap: 0.5rem;
+			margin-bottom: 0.75rem;
+		}
+
+		.language-btn {
+			background: var(--bg-deep);
+			border: 1px solid var(--border-subtle);
+			border-radius: 8px;
+			padding: 0.625rem 0.5rem;
+			font-family: inherit;
+			font-size: 0.75rem;
+			color: var(--text-secondary);
+			cursor: pointer;
+			transition: all 0.2s var(--ease-out-expo);
+			text-align: center;
+		}
+
+		.language-btn:hover {
+			background: var(--bg-elevated);
+			border-color: var(--border-focus);
+			color: var(--text-primary);
+		}
+
+		.language-btn.selected {
+			background: var(--accent-glow);
+			border-color: var(--accent);
+			color: var(--accent);
+		}
+
+		.language-btn span {
+			display: block;
+			font-size: 1rem;
+			margin-bottom: 0.125rem;
+		}
+
+		.custom-language {
+			position: relative;
+		}
+
+		.custom-language input {
+			width: 100%;
+			background: var(--bg-deep);
+			border: 1px solid var(--border-subtle);
+			border-radius: 8px;
+			padding: 0.75rem 1rem;
+			font-family: inherit;
+			font-size: 0.875rem;
+			color: var(--text-primary);
+			transition: all 0.2s ease;
+		}
+
+		.custom-language input::placeholder {
+			color: var(--text-muted);
+		}
+
+		.custom-language input:hover {
+			border-color: var(--border-focus);
+		}
+
+		.custom-language input:focus {
+			outline: none;
+			border-color: var(--accent);
+			box-shadow: 0 0 0 3px var(--accent-glow);
+		}
+
+		.custom-language input.has-value {
+			border-color: var(--accent);
+		}
+
+		/* Submit button */
+		.submit-btn {
+			width: 100%;
+			background: linear-gradient(135deg, var(--accent) 0%, #ea580c 100%);
+			border: none;
+			border-radius: 10px;
+			padding: 1rem 1.5rem;
+			font-family: inherit;
+			font-size: 0.9375rem;
+			font-weight: 600;
+			color: white;
+			cursor: pointer;
+			transition: all 0.3s var(--ease-out-expo);
+			position: relative;
+			overflow: hidden;
+		}
+
+		.submit-btn::before {
+			content: '';
+			position: absolute;
+			inset: 0;
+			background: linear-gradient(135deg, var(--accent-hover) 0%, var(--accent) 100%);
+			opacity: 0;
+			transition: opacity 0.3s ease;
+		}
+
+		.submit-btn:hover:not(:disabled)::before {
+			opacity: 1;
+		}
+
+		.submit-btn:hover:not(:disabled) {
+			transform: translateY(-2px);
+			box-shadow: 0 8px 24px rgba(249, 115, 22, 0.3);
+		}
+
+		.submit-btn:active:not(:disabled) {
+			transform: translateY(0);
+		}
+
+		.submit-btn:disabled {
+			opacity: 0.5;
+			cursor: not-allowed;
+		}
+
+		.submit-btn span {
+			position: relative;
+			z-index: 1;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			gap: 0.5rem;
+		}
+
+		.submit-btn .spinner {
+			display: none;
+			width: 18px;
+			height: 18px;
+			border: 2px solid rgba(255, 255, 255, 0.3);
+			border-top-color: white;
+			border-radius: 50%;
+			animation: spin 0.8s linear infinite;
+		}
+
+		.submit-btn.loading .spinner {
+			display: block;
+		}
+
+		@keyframes spin {
+			to { transform: rotate(360deg); }
+		}
+
+		/* Messages */
+		.message {
+			padding: 0.875rem 1rem;
+			border-radius: 8px;
+			font-size: 0.8125rem;
+			margin-bottom: 1rem;
+			display: none;
+			align-items: flex-start;
+			gap: 0.625rem;
+			animation: slideIn 0.3s var(--ease-out-expo);
+		}
+
+		@keyframes slideIn {
+			from {
+				opacity: 0;
+				transform: translateY(-8px);
+			}
+			to {
+				opacity: 1;
+				transform: translateY(0);
+			}
+		}
+
+		.message.visible {
+			display: flex;
+		}
+
+		.message.error {
+			background: var(--error-bg);
+			border: 1px solid rgba(239, 68, 68, 0.2);
+			color: #fca5a5;
+		}
+
+		.message.warning {
+			background: var(--warning-bg);
+			border: 1px solid rgba(234, 179, 8, 0.2);
+			color: #fde047;
+		}
+
+		.message.success {
+			background: var(--success-bg);
+			border: 1px solid rgba(34, 197, 94, 0.2);
+			color: #86efac;
+		}
+
+		.message svg {
+			width: 16px;
+			height: 16px;
+			flex-shrink: 0;
+			margin-top: 1px;
+		}
+
+		/* Footer */
+		footer {
+			position: relative;
+			z-index: 10;
+			text-align: center;
+			padding: 2rem;
+			font-size: 0.8125rem;
+			color: var(--text-muted);
+		}
+
+		footer a {
+			color: var(--text-secondary);
+			text-decoration: none;
+			transition: color 0.2s ease;
+		}
+
+		footer a:hover {
+			color: var(--accent);
+		}
+
+		/* Supported languages panel */
+		.languages-info {
+			margin-top: 2rem;
+			padding-top: 1.5rem;
+			border-top: 1px solid var(--border-subtle);
+		}
+
+		.languages-toggle {
+			background: none;
+			border: none;
+			font-family: inherit;
+			font-size: 0.8125rem;
+			color: var(--text-muted);
+			cursor: pointer;
+			display: flex;
+			align-items: center;
+			gap: 0.5rem;
+			margin: 0 auto;
+			padding: 0.5rem;
+			transition: color 0.2s ease;
+		}
+
+		.languages-toggle:hover {
+			color: var(--text-secondary);
+		}
+
+		.languages-toggle svg {
+			width: 16px;
+			height: 16px;
+			transition: transform 0.3s var(--ease-out-expo);
+		}
+
+		.languages-toggle.expanded svg {
+			transform: rotate(180deg);
+		}
+
+		.languages-list {
+			display: none;
+			margin-top: 1rem;
+			font-size: 0.75rem;
+			color: var(--text-muted);
+			line-height: 1.8;
+			text-align: center;
+		}
+
+		.languages-list.visible {
+			display: block;
+			animation: fadeIn 0.3s ease;
+		}
+
+		@keyframes fadeIn {
+			from { opacity: 0; }
+			to { opacity: 1; }
+		}
+
+		/* Mobile adjustments */
+		@media (max-width: 520px) {
+			.card {
+				padding: 1.5rem;
+			}
+
+			.language-grid {
+				grid-template-columns: repeat(3, 1fr);
+			}
+
+			.hero h1 {
+				font-size: 2rem;
+			}
+
+			.drop-zone {
+				padding: 2rem 1rem;
+			}
 		}
 	</style>
 </head>
 <body>
-	<div class="container">
-		<h1>Translate Messages File</h1>
-		<div id="error-message" class="error-message" role="alert" aria-live="polite" hidden></div>
-		<form action="https://translatemessages.justblackmagic.com/" method="post" enctype="multipart/form-data">
-			<label for="file">Upload your messages.properties file:</label>
-			<input type="file" id="file" name="file" accept=".properties" required aria-describedby="file-hint">
-			<p id="file-hint" class="hint">Maximum file size: 5MB</p>
+	<div class="ambient"></div>
+	<div class="grid-pattern"></div>
 
-			<label for="language">Target Language:</label>
-			<input type="text" id="language" name="language" placeholder="e.g., fr, es, de" required aria-describedby="language-hint">
-			<p id="language-hint" class="hint">Enter a language code (e.g., fr for French, es for Spanish)</p>
+	<header>
+		<a href="/" class="logo">
+			<div class="logo-mark">T</div>
+			<span class="logo-text">TranslateMessages</span>
+		</a>
+	</header>
 
-			<button type="submit">Translate</button>
-		</form>
-	</div>
+	<main>
+		<div class="hero">
+			<h1>Translate your <span>.properties</span> files</h1>
+			<p>Powered by AI. Upload your <code>messages.properties</code> file and get instant translations for Spring Boot i18n.</p>
+		</div>
+
+		<div class="card">
+			<div id="error-message" class="message error" role="alert" aria-live="polite">
+				<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1ZM7 4.5a1 1 0 1 1 2 0v3a1 1 0 1 1-2 0v-3Zm1 7a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>
+				<span class="message-text"></span>
+			</div>
+
+			<div id="warning-message" class="message warning" role="alert" aria-live="polite">
+				<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8.982 1.566a1.13 1.13 0 0 0-1.964 0L.165 13.233c-.457.778.091 1.767.982 1.767h13.706c.89 0 1.439-.99.982-1.767L8.982 1.566ZM8 5a.905.905 0 0 1 .9.995l-.35 3.507a.553.553 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5Zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2Z"/></svg>
+				<span class="message-text"></span>
+			</div>
+
+			<div id="success-message" class="message success" role="alert" aria-live="polite">
+				<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm3.78 4.97-4.5 5.5a.75.75 0 0 1-1.12.02l-2-2a.75.75 0 1 1 1.06-1.06l1.42 1.42 3.96-4.85a.75.75 0 1 1 1.18.93v.04Z"/></svg>
+				<span class="message-text"></span>
+			</div>
+
+			<form action="https://translatemessages.justblackmagic.com/" method="post" enctype="multipart/form-data">
+				<div class="drop-zone" id="drop-zone">
+					<input type="file" id="file" name="file" accept=".properties" required aria-describedby="file-hint">
+					<div class="drop-zone-content">
+						<div class="drop-icon">
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+								<polyline points="17 8 12 3 7 8"/>
+								<line x1="12" y1="3" x2="12" y2="15"/>
+							</svg>
+						</div>
+						<p class="drop-zone-label">Drop your file here or click to browse</p>
+						<p class="drop-zone-hint" id="file-hint">.properties files up to 5MB</p>
+						<p class="file-name" id="file-name"></p>
+					</div>
+				</div>
+
+				<div class="field-group">
+					<label class="field-label">Target Language</label>
+					<div class="language-grid" id="language-grid">
+						<button type="button" class="language-btn" data-lang="es">
+							<span>ES</span>
+							Spanish
+						</button>
+						<button type="button" class="language-btn" data-lang="fr">
+							<span>FR</span>
+							French
+						</button>
+						<button type="button" class="language-btn" data-lang="de">
+							<span>DE</span>
+							German
+						</button>
+						<button type="button" class="language-btn" data-lang="it">
+							<span>IT</span>
+							Italian
+						</button>
+						<button type="button" class="language-btn" data-lang="pt">
+							<span>PT</span>
+							Portuguese
+						</button>
+						<button type="button" class="language-btn" data-lang="ja">
+							<span>JA</span>
+							Japanese
+						</button>
+						<button type="button" class="language-btn" data-lang="zh">
+							<span>ZH</span>
+							Chinese
+						</button>
+						<button type="button" class="language-btn" data-lang="ko">
+							<span>KO</span>
+							Korean
+						</button>
+					</div>
+					<div class="custom-language">
+						<input type="text" id="language" name="language" placeholder="Or enter language code (e.g., nl, ru, ar)" aria-label="Custom language code">
+					</div>
+				</div>
+
+				<button type="submit" class="submit-btn" id="submit-btn">
+					<span>
+						<span class="spinner"></span>
+						<span class="btn-text">Translate File</span>
+					</span>
+				</button>
+
+				<div class="languages-info">
+					<button type="button" class="languages-toggle" id="languages-toggle">
+						<span>View supported languages</span>
+						<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 10.53 3.72 6.25a.75.75 0 0 0-1.06 1.06l4.75 4.75a.75.75 0 0 0 1.06 0l4.75-4.75a.75.75 0 0 0-1.06-1.06L8 10.53Z"/></svg>
+					</button>
+					<div class="languages-list" id="languages-list">
+						Afrikaans, Amharic, Arabic, Asturian, Azerbaijani, Bashkir, Belarusian, Bulgarian, Bengali, Breton, Bosnian, Catalan, Cebuano, Czech, Welsh, Danish, German, Greeek, English, Spanish, Estonian, Persian, Fulah, Finnish, French, Western Frisian, Irish, Gaelic, Galician, Gujarati, Hausa, Hebrew, Hindi, Croatian, Haitian, Hungarian, Armenian, Indonesian, Igbo, Iloko, Icelandic, Italian, Japanese, Javanese, Georgian, Kazakh, Central Khmer, Kannada, Korean, Luxembourgish, Ganda, Lingala, Lao, Lithuanian, Latvian, Malagasy, Macedonian, Malayalam, Mongolian, Marathi, Malay, Burmese, Nepali, Dutch, Norwegian, Northern Sotho, Occitan, Oriya, Panjabi, Polish, Pushto, Portuguese, Romanian, Russian, Sindhi, Sinhala, Slovak, Slovenian, Somali, Albanian, Serbian, Swati, Sundanese, Swedish, Swahili, Tamil, Thai, Tagalog, Tswana, Turkish, Ukrainian, Urdu, Uzbek, Vietnamese, Wolof, Xhosa, Yiddish, Yoruba, Chinese, Zulu
+					</div>
+				</div>
+			</form>
+		</div>
+	</main>
+
+	<footer>
+		<p>Powered by <a href="https://developers.cloudflare.com/workers-ai/" target="_blank" rel="noopener">Cloudflare Workers AI</a> · <a href="https://huggingface.co/facebook/m2m100_1.2B" target="_blank" rel="noopener">m2m100 model</a></p>
+	</footer>
+
 	<script src="script.js"></script>
 </body>
 </html>
