@@ -1,5 +1,3 @@
-import { Ai } from "@cloudflare/ai";
-
 export interface Env {
 	AI: Ai;
 }
@@ -148,16 +146,16 @@ async function translateMessages(text: string, targetLanguage: string, env: Env)
 
 async function translateText(text: string, targetLanguage: string, env: Env): Promise<string> {
 	try {
-		const response = await env.AI.run<"@cf/meta/m2m100-1.2b">(
+		const response = await env.AI.run(
 			"@cf/meta/m2m100-1.2b",
 			{
 				text: text,
-				source_lang: "en", // Assuming English is the default
+				source_lang: "en",
 				target_lang: targetLanguage,
 			}
-		);
+		) as { translated_text?: string };
 
-		return response.translated_text;
+		return response.translated_text ?? "";
 	} catch (error) {
 		logError("translation_api_error", {
 			targetLanguage,
