@@ -65,6 +65,11 @@
 			background-color: #005bb5;
 		}
 
+		button:focus {
+			outline: 2px solid #005bb5;
+			outline-offset: 2px;
+		}
+
 		@media (max-width: 400px) {
 			.container {
 				padding: 1.5em;
@@ -86,17 +91,41 @@
 			opacity: 0.7;
 			cursor: not-allowed;
 		}
+
+		.error-message {
+			background-color: #fef2f2;
+			border: 1px solid #fecaca;
+			color: #991b1b;
+			padding: 0.75em;
+			border-radius: 4px;
+			margin-bottom: 1em;
+			font-size: 0.9em;
+		}
+
+		.error-message[hidden] {
+			display: none;
+		}
+
+		.hint {
+			font-size: 0.85em;
+			color: #666;
+			margin-top: -1em;
+			margin-bottom: 1.5em;
+		}
 	</style>
 </head>
 <body>
 	<div class="container">
 		<h1>Translate Messages File</h1>
+		<div id="error-message" class="error-message" role="alert" aria-live="polite" hidden></div>
 		<form action="https://translatemessages.justblackmagic.com/" method="post" enctype="multipart/form-data">
 			<label for="file">Upload your messages.properties file:</label>
-			<input type="file" id="file" name="file" accept=".properties" required>
+			<input type="file" id="file" name="file" accept=".properties" required aria-describedby="file-hint">
+			<p id="file-hint" class="hint">Maximum file size: 5MB</p>
 
-			<label for="language">Target Language (e.g., fr, es):</label>
-			<input type="text" id="language" name="language" placeholder="Enter target language code" required>
+			<label for="language">Target Language:</label>
+			<input type="text" id="language" name="language" placeholder="e.g., fr, es, de" required aria-describedby="language-hint">
+			<p id="language-hint" class="hint">Enter a language code (e.g., fr for French, es for Spanish)</p>
 
 			<button type="submit">Translate</button>
 		</form>

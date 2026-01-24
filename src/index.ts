@@ -1,16 +1,14 @@
-import { Ai } from "@cloudflare/ai";
-
 export interface Env {
-	AI: Ai;
+	AI: Pick<Ai, 'run'>;
 }
 
-interface Segment {
+export interface Segment {
 	prefix: string;
 	value: string;
 	suffix: string;
 }
 
-interface PlaceholderToken {
+export interface PlaceholderToken {
 	marker: string;
 	original: string;
 }
@@ -32,19 +30,42 @@ const SEGMENT_DELIMITER = "\u241E";
 // Pattern to match placeholders in property values
 const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]*\$?[-+#0-9.]*[a-zA-Z]/g;
 
+// Structured logging helper for better observability
+function logError(event: string, details: Record<string, unknown>): void {
+	console.error(JSON.stringify({
+		level: "error",
+		event,
+		timestamp: new Date().toISOString(),
+		...details
+	}));
+}
+
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		if (request.method !== "POST") {
 			return new Response("Invalid request method. Use POST.", { status: 405 });
 		}
 
-		const formData = await request.formData();
-		const file = formData.get("file") as File;
-		const language = formData.get("language") as string;
-
-		if (!file || !language) {
-			return new Response("File and language parameters are required.", { status: 400 });
+		let formData: FormData;
+		try {
+			formData = await request.formData();
+		} catch {
+			return new Response("Invalid request body. Expected multipart form data.", { status: 400 });
 		}
+
+		const fileEntry = formData.get("file");
+		const languageEntry = formData.get("language");
+
+		if (!(fileEntry instanceof File)) {
+			return new Response("File parameter must be a file upload.", { status: 400 });
+		}
+		if (typeof languageEntry !== "string") {
+			return new Response("Language parameter must be a string.", { status: 400 });
+		}
+
+		const file = fileEntry;
+		const language = languageEntry;
+
 
 		// Check file size (5MB limit)
 		const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
@@ -69,36 +90,49 @@ export default {
 			return new Response(`Translation service error: ${error instanceof Error ? error.message : 'Unknown error'}`, { status: 500 });
 		}
 
-		const translatedText = await translateMessages(text, languageCode, env);
+		const { translatedText, failedEntries } = await translateMessages(text, languageCode, env);
 
 		const filename = `messages_${languageCode}.properties`;
 
-		return new Response(translatedText, {
-			headers: {
-				"Content-Disposition": `attachment; filename="${filename}"`,
-				"Content-Type": "text/plain"
-			}
-		});
+		const headers: Record<string, string> = {
+			"Content-Disposition": `attachment; filename="${filename}"`,
+			"Content-Type": "text/plain; charset=utf-8"
+		};
+
+		if (failedEntries > 0) {
+			headers["X-Translation-Failures"] = String(failedEntries);
+		}
+
+		return new Response(translatedText, { headers });
 	},
 };
 
-async function translateMessages(text: string, targetLanguage: string, env: Env): Promise<string> {
+interface TranslationResult {
+	translatedText: string;
+	failedEntries: number;
+}
+
+async function translateMessages(text: string, targetLanguage: string, env: Env): Promise<TranslationResult> {
 	const newline = text.includes("\r\n") ? "\r\n" : "\n";
 	const normalizedText = text.replace(/\r\n?/g, "\n");
 	const lines = normalizedText.split("\n");
 	const translatedLines = [...lines];
 	const entries = buildEntries(lines);
 	const BATCH_SIZE = 100; // Process up to 100 translations concurrently
+	let failedEntries = 0;
 
 	for (let i = 0; i < entries.length; i += BATCH_SIZE) {
 		const batch = entries.slice(i, i + BATCH_SIZE);
 		const translationPromises = batch.map(async (entry) => {
 			const entryLines = entry.indexes.map((idx) => lines[idx]);
-			const translatedEntryLines = await translateEntry(entryLines, targetLanguage, env);
-			return { entry, translatedEntryLines };
+			const { translatedLines: translatedEntryLines, failed } = await translateEntry(entryLines, targetLanguage, env);
+			return { entry, translatedEntryLines, failed };
 		});
 		const batchResults = await Promise.all(translationPromises);
-		for (const { entry, translatedEntryLines } of batchResults) {
+		for (const { entry, translatedEntryLines, failed } of batchResults) {
+			if (failed) {
+				failedEntries++;
+			}
 			entry.indexes.forEach((lineIndex, idx) => {
 				translatedLines[lineIndex] = translatedEntryLines[idx];
 			});
@@ -106,39 +140,48 @@ async function translateMessages(text: string, targetLanguage: string, env: Env)
 	}
 
 	const joined = translatedLines.join("\n");
-	return newline === "\n" ? joined : joined.replace(/\n/g, newline);
+	const translatedText = newline === "\n" ? joined : joined.replace(/\n/g, newline);
+	return { translatedText, failedEntries };
 }
 
 async function translateText(text: string, targetLanguage: string, env: Env): Promise<string> {
 	try {
-		const response = await env.AI.run<"@cf/meta/m2m100-1.2b">(
+		const response = await env.AI.run(
 			"@cf/meta/m2m100-1.2b",
 			{
 				text: text,
-				source_lang: "en", // Assuming English is the default
+				source_lang: "en",
 				target_lang: targetLanguage,
 			}
-		);
+		) as { translated_text?: string };
 
-		return response.translated_text;
+		return response.translated_text ?? "";
 	} catch (error) {
-		console.error("Translation API error: ", error);
+		logError("translation_api_error", {
+			targetLanguage,
+			error: error instanceof Error ? error.message : String(error)
+		});
 		throw new Error(`Translation service failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
 	}
 }
 
-async function translateEntry(lines: string[], targetLanguage: string, env: Env): Promise<string[]> {
+interface EntryTranslationResult {
+	translatedLines: string[];
+	failed: boolean;
+}
+
+async function translateEntry(lines: string[], targetLanguage: string, env: Env): Promise<EntryTranslationResult> {
 	const firstLine = lines[0];
 	const trimmedFirstLine = firstLine.trim();
 
 	if (!trimmedFirstLine || trimmedFirstLine.startsWith("#") || trimmedFirstLine.startsWith("!")) {
-		return lines;
+		return { translatedLines: lines, failed: false };
 	}
 
 	const segments: Segment[] = [];
 	const firstSegment = parseFirstLine(firstLine);
 	if (!firstSegment) {
-		return lines;
+		return { translatedLines: lines, failed: false };
 	}
 	segments.push(firstSegment);
 
@@ -150,11 +193,11 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 	const unescapedValues = segments.map(segment => unescapePropertiesText(segment.value));
 
 	if (unescapedValues.every(value => value === "")) {
-		return lines;
+		return { translatedLines: lines, failed: false };
 	}
 
 	if (unescapedValues.some(value => value.includes(SEGMENT_DELIMITER))) {
-		return lines;
+		return { translatedLines: lines, failed: false };
 	}
 
 	const placeholderCounter = { current: 0 };
@@ -166,17 +209,21 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 		const translatedSegments = translatedCombined.split(SEGMENT_DELIMITER);
 
 		if (translatedSegments.length !== segments.length) {
-			return lines;
+			return { translatedLines: lines, failed: true };
 		}
 
-		return segments.map((segment, idx) => {
+		const translatedLines = segments.map((segment, idx) => {
 			const restoredPlaceholders = restorePlaceholders(translatedSegments[idx], maskedSegments[idx].tokens);
 			const escapedValue = escapePropertiesText(restoredPlaceholders);
 			return `${segment.prefix}${escapedValue}${segment.suffix}`;
 		});
+		return { translatedLines, failed: false };
 	} catch (error) {
-		console.error("Failed to translate entry:", error);
-		return lines;
+		logError("entry_translation_failed", {
+			entryKey: firstLine.split(/[=:\s]/)[0]?.trim() || "unknown",
+			error: error instanceof Error ? error.message : String(error)
+		});
+		return { translatedLines: lines, failed: true };
 	}
 }
 
@@ -394,18 +441,18 @@ function findFirstWhitespaceSeparator(line: string): number | null {
 }
 
 function unescapePropertiesText(value: string): string {
-	let result = "";
+	const result: string[] = [];
 
 	for (let i = 0; i < value.length; i++) {
 		const char = value[i];
 
 		if (char !== "\\") {
-			result += char;
+			result.push(char);
 			continue;
 		}
 
 		if (i === value.length - 1) {
-			result += "\\";
+			result.push("\\");
 			break;
 		}
 
@@ -414,74 +461,74 @@ function unescapePropertiesText(value: string): string {
 
 		switch (nextChar) {
 			case "t":
-				result += "\t";
+				result.push("\t");
 				break;
 			case "r":
-				result += "\r";
+				result.push("\r");
 				break;
 			case "n":
-				result += "\n";
+				result.push("\n");
 				break;
 			case "f":
-				result += "\f";
+				result.push("\f");
 				break;
 			case "u": {
 				const hex = value.slice(i + 1, i + 5);
 				if (/^[0-9a-fA-F]{4}$/.test(hex)) {
-					result += String.fromCharCode(parseInt(hex, 16));
+					result.push(String.fromCharCode(parseInt(hex, 16)));
 					i += 4;
 				} else {
-					result += "\\u";
+					result.push("\\u");
 				}
 				break;
 			}
 			default:
-				result += nextChar;
+				result.push(nextChar);
 				break;
 		}
 	}
 
-	return result;
+	return result.join("");
 }
 
 function escapePropertiesText(value: string): string {
-	let result = "";
+	const result: string[] = [];
 
 	for (const char of value) {
 		switch (char) {
 			case "\\":
-				result += "\\\\";
+				result.push("\\\\");
 				break;
 			case "\t":
-				result += "\\t";
+				result.push("\\t");
 				break;
 			case "\r":
-				result += "\\r";
+				result.push("\\r");
 				break;
 			case "\n":
-				result += "\\n";
+				result.push("\\n");
 				break;
 			case "\f":
-				result += "\\f";
+				result.push("\\f");
 				break;
 			case "=":
 			case ":":
 			case "#":
 			case "!":
-				result += `\\${char}`;
+				result.push(`\\${char}`);
 				break;
 			default: {
 				const code = char.charCodeAt(0);
 				if (code < 0x20 || code > 0x7e) {
-					result += `\\u${code.toString(16).padStart(4, "0")}`;
+					result.push(`\\u${code.toString(16).padStart(4, "0")}`);
 				} else {
-					result += char;
+					result.push(char);
 				}
 			}
 		}
 	}
 
-	return result;
+	return result.join("");
 }
 
 function maskPlaceholders(value: string, counter: { current: number }): { text: string; tokens: PlaceholderToken[] } {
@@ -504,3 +551,16 @@ function restorePlaceholders(text: string, tokens: PlaceholderToken[]): string {
 
 	return restored;
 }
+
+// Export parsing functions for testing
+export {
+	buildEntries,
+	unescapePropertiesText,
+	escapePropertiesText,
+	maskPlaceholders,
+	restorePlaceholders,
+	parseFirstLine,
+	parseContinuationLine,
+	lineHasContinuation,
+	SUPPORTED_LANGUAGES
+};

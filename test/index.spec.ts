@@ -1,7 +1,7 @@
 // test/index.spec.ts
 import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
 import { describe, it, expect, vi } from 'vitest';
-import worker from '../src/index';
+import worker, { type Env } from '../src/index';
 
 // For now, you'll need to do something like this to get a correctly-typed
 // `Request` to pass to `worker.fetch()`.
@@ -11,27 +11,46 @@ describe('TranslateMessages Worker', () => {
 	it('rejects non-POST requests', async () => {
 		const request = new IncomingRequest('http://example.com');
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
+		const response = await worker.fetch(request, env as Env, ctx);
 		await waitOnExecutionContext(ctx);
 		
 		expect(response.status).toBe(405);
 		expect(await response.text()).toBe("Invalid request method. Use POST.");
 	});
 
-	it('requires file and language parameters', async () => {
+	it('requires file parameter to be a file upload', async () => {
 		const formData = new FormData();
-		// Missing both file and language
-		
+		// Missing file - only has language
+		formData.append('language', 'fr');
+
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
 			body: formData
 		});
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
+		const response = await worker.fetch(request, env as Env, ctx);
 		await waitOnExecutionContext(ctx);
-		
+
 		expect(response.status).toBe(400);
-		expect(await response.text()).toBe("File and language parameters are required.");
+		expect(await response.text()).toBe("File parameter must be a file upload.");
+	});
+
+	it('requires language parameter to be a string', async () => {
+		const formData = new FormData();
+		const file = new File(['test=Test'], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		// Missing language
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env as Env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(400);
+		expect(await response.text()).toBe("Language parameter must be a string.");
 	});
 
 	it('rejects files larger than 5MB', async () => {
@@ -47,7 +66,7 @@ describe('TranslateMessages Worker', () => {
 			body: formData
 		});
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
+		const response = await worker.fetch(request, env as Env, ctx);
 		await waitOnExecutionContext(ctx);
 		
 		expect(response.status).toBe(413);
@@ -65,7 +84,7 @@ describe('TranslateMessages Worker', () => {
 			body: formData
 		});
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
+		const response = await worker.fetch(request, env as Env, ctx);
 		await waitOnExecutionContext(ctx);
 		
 		expect(response.status).toBe(400);
@@ -278,5 +297,135 @@ describe('TranslateMessages Worker', () => {
 		expect(response.status).toBe(200);
 		const body = await response.text();
 		expect(body).toBe("placeholder=Salut {0}\\! %s ${name}\n");
+	});
+
+	it('handles empty files gracefully', async () => {
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ translated_text: 'ok' });
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'fr');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body).toBe("");
+	});
+
+	it('handles files with only whitespace and comments', async () => {
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ translated_text: 'ok' });
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "# Header comment\n\n! Another comment\n   \n";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'fr');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body).toBe("# Header comment\n\n! Another comment\n   \n");
+	});
+
+	it('includes translation failure count in header when entries fail', async () => {
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ translated_text: 'ok' })
+			.mockResolvedValueOnce({ translated_text: 'Bonjour' })
+			.mockRejectedValueOnce(new Error('Translation failed'));
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "greeting=Hello\nfarewell=Goodbye\n";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'fr');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get('X-Translation-Failures')).toBe('1');
+		const body = await response.text();
+		// First entry translated, second kept original due to failure
+		expect(body).toBe("greeting=Bonjour\nfarewell=Goodbye\n");
+	});
+
+	it('includes charset in Content-Type header', async () => {
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ translated_text: 'ok' })
+			.mockResolvedValueOnce({ translated_text: 'Bonjour' });
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "greeting=Hello\n";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'fr');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get('Content-Type')).toBe('text/plain; charset=utf-8');
+	});
+
+	it('rejects malformed form data', async () => {
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: 'not-valid-form-data',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env as Env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(400);
+		expect(await response.text()).toBe("File parameter must be a file upload.");
 	});
 });
