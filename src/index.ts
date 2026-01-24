@@ -1,5 +1,5 @@
 export interface Env {
-	AI: Ai;
+	AI: Pick<Ai, 'run'>;
 }
 
 export interface Segment {

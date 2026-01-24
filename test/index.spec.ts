@@ -1,7 +1,7 @@
 // test/index.spec.ts
 import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
 import { describe, it, expect, vi } from 'vitest';
-import worker from '../src/index';
+import worker, { type Env } from '../src/index';
 
 // For now, you'll need to do something like this to get a correctly-typed
 // `Request` to pass to `worker.fetch()`.
@@ -11,7 +11,7 @@ describe('TranslateMessages Worker', () => {
 	it('rejects non-POST requests', async () => {
 		const request = new IncomingRequest('http://example.com');
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
+		const response = await worker.fetch(request, env as Env, ctx);
 		await waitOnExecutionContext(ctx);
 		
 		expect(response.status).toBe(405);
@@ -28,7 +28,7 @@ describe('TranslateMessages Worker', () => {
 			body: formData
 		});
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
+		const response = await worker.fetch(request, env as Env, ctx);
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(400);
@@ -46,7 +46,7 @@ describe('TranslateMessages Worker', () => {
 			body: formData
 		});
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
+		const response = await worker.fetch(request, env as Env, ctx);
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(400);
@@ -66,7 +66,7 @@ describe('TranslateMessages Worker', () => {
 			body: formData
 		});
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
+		const response = await worker.fetch(request, env as Env, ctx);
 		await waitOnExecutionContext(ctx);
 		
 		expect(response.status).toBe(413);
@@ -84,7 +84,7 @@ describe('TranslateMessages Worker', () => {
 			body: formData
 		});
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
+		const response = await worker.fetch(request, env as Env, ctx);
 		await waitOnExecutionContext(ctx);
 		
 		expect(response.status).toBe(400);
@@ -422,7 +422,7 @@ describe('TranslateMessages Worker', () => {
 			headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
 		});
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
+		const response = await worker.fetch(request, env as Env, ctx);
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(400);
