@@ -1,7 +1,7 @@
 #:schema node_modules/wrangler/config-schema.json
 name = "translatemessages"
 main = "src/index.ts"
-compatibility_date = "2024-08-06"
+compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
 [observability]
@@ -109,3 +109,14 @@ binding = "AI"
 # [[vectorize]]
 # binding = "MY_INDEX"
 # index_name = "my-index"
+
+# Staging environment configuration
+# Deploy with: wrangler deploy --env staging
+[env.staging]
+name = "translatemessages-staging"
+
+[env.staging.ai]
+binding = "AI"
+
+[env.staging.observability]
+enabled = true
