@@ -4,78 +4,60 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TranslateMessages is a Cloudflare Workers application that translates Java Spring Boot `messages.properties` files into multiple languages using Cloudflare's AI service (Facebook's m2m100_1.2B model). It consists of three main components:
+TranslateMessages is a Cloudflare Workers application that translates Java Spring Boot `messages.properties` files into multiple languages using Cloudflare's AI service (m2m100-1.2B model).
 
-1. **Cloudflare Worker** (`src/index.ts`): Backend API handling file uploads and translations
-2. **Web Interface** (`public/`): Cloudflare Pages frontend for browser-based usage
-3. **Ruby CLI** (`translate_messages.rb`): Command-line tool for batch translations
+Components:
+- **Cloudflare Worker** (`src/index.ts`): Backend API handling POST requests with file uploads
+- **Web Interface** (`pages/`): Cloudflare Pages frontend for browser-based usage
+- **Ruby CLI** (`translate_messages.rb`): Command-line tool for batch translations
+
+Demo: https://translatemessages.pages.dev
 
 ## Development Commands
 
 ```bash
-# Start local development server
-npm run dev
-
-# Run tests
-npm test
-
-# Deploy to Cloudflare
-npm run deploy
-
-# Generate TypeScript types from wrangler.toml
-npm run cf-typegen
+npm run dev      # Start local development server
+npm test         # Run tests (Vitest with Cloudflare Workers pool)
+npm run deploy   # Deploy Worker to Cloudflare
+npm run cf-typegen  # Generate TypeScript types from wrangler.toml
 ```
 
-## Architecture
+## Translation Pipeline Architecture
 
-The application follows a serverless architecture:
+The Worker processes `.properties` files through several stages in `src/index.ts`:
 
-- **Entry Point**: `src/index.ts` - Main Worker handling POST requests to `/translate`
-- **Frontend**: Static files in `public/` served via Cloudflare Pages
-- **Configuration**: `wrangler.toml` defines the Worker with AI binding
-- **Testing**: Tests in `test/` directory using Vitest with Cloudflare Workers pool
+1. **Entry Building** (`buildEntries`): Groups lines into logical entries, handling multi-line continuations (lines ending with odd number of backslashes)
 
-Key architectural decisions:
-- Uses Cloudflare AI binding for translation (no external API calls)
-- Streams file uploads to handle large files efficiently
-- Returns translated content as downloadable files with appropriate naming
-- Supports multiple target languages in a single request
+2. **Parsing**: Each entry is parsed into segments with `prefix`, `value`, and `suffix`:
+   - `parseFirstLine`: Finds key-value separator (`=`, `:`, or whitespace)
+   - `parseContinuationLine`: Handles continuation lines preserving leading whitespace
+   - `extractValueAndSuffix`: Separates value from trailing whitespace, continuations, and inline comments
+
+3. **Pre-translation Processing**:
+   - `unescapePropertiesText`: Converts escape sequences (`\n`, `\t`, `\uXXXX`, etc.) to actual characters
+   - `maskPlaceholders`: Replaces `{0}`, `${name}`, `%s` style placeholders with markers (`__PH_N__`) to protect them from translation
+
+4. **Translation**: Segments are joined with a special delimiter (`\u241E`) and sent to the AI model in batches of 100 concurrent requests
+
+5. **Post-translation Processing**:
+   - `restorePlaceholders`: Puts original placeholders back
+   - `escapePropertiesText`: Re-escapes special characters for `.properties` format
+   - Line structure (prefixes, suffixes, newline style) is preserved
 
 ## Testing
 
-Tests use Vitest with `@cloudflare/vitest-pool-workers` for Worker-specific testing:
+Tests in `test/index.spec.ts` use mocked AI responses. The test environment uses `@cloudflare/vitest-pool-workers` configured in `vitest.config.mts`.
 
+Run a specific test:
 ```bash
-# Run all tests
-npm test
-
-# Test files are located in test/ directory
+npm test -- -t "test name pattern"
 ```
 
 ## Deployment
 
-The project deploys to two Cloudflare services:
+- **Worker**: `npm run deploy` (requires `wrangler login` first)
+- **Pages**: `wrangler pages publish pages --project-name <name>` (update form action URL in `pages/index.html` first)
 
-1. **Worker**: Deployed via `npm run deploy` (API endpoint)
-2. **Pages**: Frontend deployed separately (see README.md for manual steps)
+## Supported Languages
 
-Demo site: https://translatemessages.pages.dev
-
-## Key Files and Their Purposes
-
-- `src/index.ts`: Main Worker logic handling translation requests
-- `wrangler.toml`: Cloudflare Worker configuration with AI binding
-- `translate_messages.rb`: Ruby CLI for batch translation operations
-- `public/index.html`: Web interface for browser-based uploads
-- `public/script.js`: Frontend JavaScript handling file uploads and UI
-
-## Working with Cloudflare AI
-
-The Worker uses Cloudflare's AI binding configured in `wrangler.toml`:
-
-```toml
-[ai]
-binding = "AI"
-```
-
-Translation model: `@cf/m2m100/m2m100-1.2b` supporting multiple language pairs.
+Uses m2m100 model - see https://huggingface.co/facebook/m2m100_1.2B#languages-covered. Dialects (e.g., pt-BR vs pt-PT) are not supported; language codes are normalized by taking the part before any hyphen.
