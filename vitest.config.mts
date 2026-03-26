@@ -1,12 +1,10 @@
-import { defineWorkersConfig } from '@cloudflare/vitest-pool-workers/config';
+import { defineConfig } from 'vitest/config';
+import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
 
-export default defineWorkersConfig({
-	test: {
-		poolOptions: {
-			workers: {
-				// Use test config without AI binding to avoid remote mode in CI
-				wrangler: { configPath: './wrangler.test.toml' },
-			},
-		},
-	},
+export default defineConfig({
+	plugins: [
+		cloudflareTest({
+			wrangler: { configPath: './wrangler.test.toml' },
+		}),
+	],
 });
