@@ -12,7 +12,25 @@ The goal of this project is to simplify the process of translating message prope
 
 ## Valid Languages
 The AI model being used is the m2m100, and you can see the languages supported here: https://huggingface.co/facebook/m2m100_1.2B#languages-covered
-Currently dialects are not supported, such as Brazililan Portugese versus Portugese Portuguse, or the Hong Kong or Tiawanese dialects of Chinese. 
+Currently dialects are not supported, such as Brazilian Portuguese versus European Portuguese, or the Hong Kong or Taiwanese dialects of Chinese.
+
+## Prerequisites
+
+- [Node.js](https://nodejs.org/) (v20 or later recommended)
+- A [Cloudflare account](https://dash.cloudflare.com/sign-up) with Workers AI enabled
+
+## Getting Started
+
+```bash
+npm install
+```
+
+### Development
+
+```bash
+npm run dev      # Start local development server
+npm test         # Run tests (Vitest with Cloudflare Workers pool)
+```
 
 ## Cloudflare Worker
 
@@ -22,35 +40,28 @@ To deploy the Cloudflare Worker that handles the translation of `messages.proper
 
 #### 1. Set Up the Wrangler CLI
 
-If you haven't already, you'll need to install the Wrangler CLI, which is used to manage and deploy Cloudflare Workers.
+Log in to your Cloudflare account:
 
-- **Install Wrangler**:
-  ```bash
-  npm install -g wrangler
-  ```
-
-- **Login to Cloudflare**:
-  After installing Wrangler, log in to your Cloudflare account:
-  ```bash
-  wrangler login
-  ```
+```bash
+npx wrangler login
+```
 
 This command will open a browser window for you to authenticate your Cloudflare account.
 
 #### 2. Deploy the Worker
 
-Once everything is set up, you can deploy your Worker to Cloudflare.
+Once everything is set up, you can deploy your Worker to Cloudflare:
 
-  ```bash
-  wrangler deploy
-  ```
+```bash
+npm run deploy
+```
 
-  This command will bundle your project and deploy it to Cloudflare Workers. Wrangler will provide you with a URL where your Worker is hosted.
+This command will bundle your project and deploy it to Cloudflare Workers. Wrangler will provide you with a URL where your Worker is hosted.
 
-  To deploy to the staging environment:
-  ```bash
-  wrangler deploy --env staging
-  ```
+To deploy to the staging environment:
+```bash
+npx wrangler deploy --env staging
+```
 
 #### 3. Testing the Worker
 
@@ -69,9 +80,9 @@ This command uploads `messages.properties` and requests a translation to French.
 ### Continuous Integration
 
 This project includes a GitHub Actions CI workflow (`.github/workflows/ci.yml`) that:
-- Runs type checking with TypeScript
+- Runs TypeScript type checking (source and test files)
 - Executes the test suite
-- Optionally deploys to staging on push to main
+- Deploys to staging on push to main
 
 To enable automatic staging deployments, add a `CLOUDFLARE_API_TOKEN` secret to your GitHub repository.
 
@@ -90,7 +101,7 @@ To enable automatic staging deployments, add a `CLOUDFLARE_API_TOKEN` secret to 
 
 ## Cloudflare Pages Deployment
 
-This project includes a `pages` directory containing an `index.html` file, which serves as a front-end form for interacting with the Cloudflare Worker. This HTML form allows users to upload a `messages.properties` file and specify a target language for translation.
+This project includes a `pages` directory containing an `index.html` file and a `script.js` file, which together serve as a front-end form for interacting with the Cloudflare Worker. The form allows users to upload a `messages.properties` file and specify a target language for translation.
 
 This is completely optional!
 
@@ -137,7 +148,7 @@ Once you have edited the `index.html` file, you can deploy the `pages` directory
    - Use the following command to deploy the `pages` directory:
 
 	 ```bash
-	 wrangler pages publish pages --project-name <your-project-name>
+	 npx wrangler pages deploy pages --project-name <your-project-name>
 	 ```
 
    - Replace `<your-project-name>` with a unique name for your Cloudflare Pages project.
@@ -179,28 +190,28 @@ The script provides several options to customize its behavior:
    - By default, the script uploads `messages.properties` from the current directory and translates it into the languages specified in the `DEFAULT_LANGUAGES` list:
 
    ```bash
-   ruby translate_messages.rb
+   ruby cli/translate_messages.rb
    ```
 
 2. **Specify a Custom File**:
    - You can specify a different file to upload using the `-f` or `--file` option:
 
    ```bash
-   ruby translate_messages.rb -f custom_messages.properties
+   ruby cli/translate_messages.rb -f custom_messages.properties
    ```
 
 3. **Specify Custom Target Languages**:
    - You can specify a comma-separated list of target languages using the `-l` or `--languages` option. This overrides the default languages:
 
    ```bash
-   ruby translate_messages.rb -l fr,es,it
+   ruby cli/translate_messages.rb -l fr,es,it
    ```
 
 4. **Combine Options**:
    - You can combine the file and language options to customize both the file to be uploaded and the target languages:
 
    ```bash
-   ruby translate_messages.rb -f custom_messages.properties -l fr,es,it
+   ruby cli/translate_messages.rb -f custom_messages.properties -l fr,es,it
    ```
 
 ### Customization
@@ -216,9 +227,12 @@ When the script runs successfully, you will see messages indicating that the tra
 
 ## Project Structure
 
-- **Cloudflare Worker**: Handles the actual translation logic.
-- **Cloudflare Pages HTML**: An example HTML page form to upload a message.properties file for translation.
-- **Ruby CLI Script**: Facilitates interaction with the Worker and automates the translation process.
+- **`src/index.ts`** — Cloudflare Worker handling the translation logic
+- **`pages/`** — Cloudflare Pages frontend (`index.html` + `script.js`)
+- **`cli/translate_messages.rb`** — Ruby CLI script for batch translations
+- **`test/`** — Test suite (`index.spec.ts`, `parsing.spec.ts`) using Vitest with Cloudflare Workers pool
+- **`wrangler.toml`** — Cloudflare Worker configuration (includes staging environment)
+- **`.github/workflows/ci.yml`** — CI pipeline (type check, test, staging deploy)
 
 ## Conclusion
 
