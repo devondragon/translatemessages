@@ -35,6 +35,13 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # Builds the Worker and resolves the staging config without authenticating
+      # or uploading, so it runs on fork PRs with no secrets. Catches config,
+      # bundle and toolchain breakage on the PR instead of after merge, since
+      # deploy-staging below is push-only and never runs on a PR.
+      - name: Validate staging deploy config
+        run: npx wrangler deploy --env staging --dry-run
+
   deploy-staging:
     runs-on: ubuntu-latest
     needs: test
