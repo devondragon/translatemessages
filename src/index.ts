@@ -24,16 +24,20 @@ const SUPPORTED_LANGUAGES = [
 	"yi", "yo", "zh", "zu"
 ];
 
-// Delimiter used to separate segments in multi-line properties
-const SEGMENT_DELIMITER = "\u241E";
+// Delimiter used to separate segments in multi-line properties.
+// Must be plain ASCII: the translation model silently drops non-ASCII characters
+// (U+241E was dropped every time), which broke segment splitting and caused
+// correctly translated multi-line entries to be discarded as failures.
+const SEGMENT_DELIMITER = "__SEG__";
 
 // Pattern to match placeholders in property values
 const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]*\$?[-+#0-9.]*[a-zA-Z]/g;
 
 // Control characters are masked alongside placeholders because the translation
 // model normalizes whitespace: a raw \n or \t sent to it comes back as a space,
-// silently destroying the escape sequence in the output file.
-const CONTROL_CHAR_REGEX = /[\n\r\t\f]/g;
+// silently destroying the escape sequence in the output file. The full C0 range
+// and DEL are covered because \uXXXX escapes can decode to any of them.
+const CONTROL_CHAR_REGEX = /[\x00-\x1f\x7f]/g;
 
 // Structured logging helper for better observability
 function logError(event: string, details: Record<string, unknown>): void {
@@ -207,7 +211,10 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 
 	const placeholderCounter = { current: 0 };
 	const maskedSegments = unescapedValues.map(value => maskPlaceholders(value, placeholderCounter));
-	const combinedValue = maskedSegments.map(segment => segment.text).join(SEGMENT_DELIMITER);
+	// A trailing space keeps the delimiter from fusing to the following word, which
+	// left that word untranslated. Continuation values already end with a space
+	// before their backslash, so the left-hand side needs no padding.
+	const combinedValue = maskedSegments.map(segment => segment.text).join(`${SEGMENT_DELIMITER} `);
 
 	try {
 		const translatedCombined = await translateText(combinedValue, targetLanguage, env);
@@ -218,7 +225,13 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 		}
 
 		const translatedLines = segments.map((segment, idx) => {
-			const restoredPlaceholders = restorePlaceholders(translatedSegments[idx], maskedSegments[idx].tokens);
+			// Drop the padding space introduced by the join. Continuation values never
+			// begin with whitespace (parseContinuationLine moves it into the prefix),
+			// so any leading whitespace here is an artifact.
+			const translatedSegment = idx === 0
+				? translatedSegments[idx]
+				: translatedSegments[idx].replace(/^[ \t]+/, "");
+			const restoredPlaceholders = restorePlaceholders(translatedSegment, maskedSegments[idx].tokens);
 			const escapedValue = escapePropertiesText(restoredPlaceholders);
 			return `${segment.prefix}${escapedValue}${segment.suffix}`;
 		});

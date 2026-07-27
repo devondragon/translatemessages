@@ -186,7 +186,7 @@ describe('TranslateMessages Worker', () => {
 	it('handles multi-line entries using continuations', async () => {
 		const mockRun = vi.fn()
 			.mockResolvedValueOnce({ translated_text: 'ok' })
-			.mockResolvedValueOnce({ translated_text: 'Bonjour \u241EMonde' });
+			.mockResolvedValueOnce({ translated_text: 'Bonjour __SEG__Monde' });
 
 		const mockEnv = {
 			...env,
@@ -333,6 +333,49 @@ describe('TranslateMessages Worker', () => {
 		// No raw control character may reach the model; only the masked marker form.
 		const translated = mockRun.mock.calls.map(([, args]) => args.text);
 		expect(translated.some((text) => /[\n\t\r\f]/.test(text))).toBe(false);
+	});
+
+	it('translates multi-line continuation entries when the model drops non-ASCII', async () => {
+		// The real m2m100 model silently drops non-ASCII characters such as U+241E.
+		// That destroyed segment splitting, so a correctly translated multi-line
+		// entry was discarded and fell back to the untranslated original.
+		const mockRun = vi.fn().mockImplementation((_model, args) =>
+			Promise.resolve({ translated_text: args.text.replace(/[^\x00-\x7F]/g, '').toUpperCase() })
+		);
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "multi=first part \\\n    second part \\\n    third part\n";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'es');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const body = await response.text();
+
+		// The uppercase marker proves the translation was kept rather than
+		// discarded via the failed-segment-count fallback.
+		expect(body).toContain('FIRST PART');
+		expect(body).toContain('SECOND PART');
+		expect(body).toContain('THIRD PART');
+		// Continuation structure must still be intact.
+		expect(body.split('\n').filter((l) => l.trim()).length).toBe(3);
+
+		// The delimiter itself must be ASCII so the model can round-trip it.
+		const sent = mockRun.mock.calls.map(([, args]) => args.text);
+		expect(sent.some((text) => /[^\x00-\x7F]/.test(text))).toBe(false);
 	});
 
 	it('handles empty files gracefully', async () => {
