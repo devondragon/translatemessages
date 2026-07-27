@@ -1,14 +1,12 @@
-# Production drift check.
-# Deploy-failure alerting cannot catch a production Worker that is simply stale,
-# because nothing fails — production ran 21-month-old code without a single red
-# build. This compares what production is running against what is on main and
-# files an issue when they diverge.
+# Production drift check — on demand only.
+# Reports whether production is running older code than main. Deliberately not
+# scheduled: production is deployed manually and infrequently, so it is behind
+# main most of the time by design, and a recurring check would just file the
+# same complaint forever. Run it from the Actions tab when you actually want
+# to know.
 name: Production drift check
 
 on:
-  schedule:
-    # Mondays, 14:00 UTC
-    - cron: '0 14 * * 1'
   workflow_dispatch:
 
 permissions:
