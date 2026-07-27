@@ -7,10 +7,13 @@ import worker, { type Env } from '../src/index';
 // `Request` to pass to `worker.fetch()`.
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
-function buildForm(content: string, language: string): FormData {
+function buildForm(content: string, language: string, model?: string): FormData {
 	const formData = new FormData();
 	formData.append('file', new File([content], 'messages.properties', { type: 'text/plain' }));
 	formData.append('language', language);
+	if (model !== undefined) {
+		formData.append('model', model);
+	}
 	return formData;
 }
 
@@ -816,5 +819,93 @@ describe('CORS', () => {
 		expect(response.status).toBe(200);
 		expect(response.headers.get('Access-Control-Allow-Origin')).toBeNull();
 		expect(await response.text()).toBe("greeting=Bonjour\n");
+	});
+});
+
+// The llama backend is an experiment behind the `model` form field: it asks an
+// instruction-following model to copy placeholders rather than masking them, so it
+// can be compared against m2m100 on identical input. See scripts/compare-models.mjs.
+describe('llama backend (experimental)', () => {
+	function runWith(mockRun: ReturnType<typeof vi.fn>, content: string, model?: string) {
+		const mockEnv = { ...env, AI: { run: mockRun } };
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm(content, 'fr', model)
+		});
+		const ctx = createExecutionContext();
+		return worker.fetch(request, mockEnv, ctx).then(async (response) => {
+			await waitOnExecutionContext(ctx);
+			return response;
+		});
+	}
+
+	it('sends placeholders unmasked and keeps them in the output', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ response: 'Bonjour {0}' });
+
+		const response = await runWith(mockRun, "greeting=Hello {0}\n", 'llama');
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe("greeting=Bonjour {0}\n");
+
+		const [modelId, args] = mockRun.mock.calls[0];
+		expect(modelId).toBe('@cf/meta/llama-3-8b-instruct-awq');
+		// The whole hypothesis: the model sees the real placeholder, not a marker.
+		expect(args.messages[1].content).toBe('Hello {0}');
+		expect(args.messages[0].content).toContain('{0}');
+	});
+
+	it('defaults to m2m100 when no model is requested', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ translated_text: 'Bonjour XQZ0' });
+
+		const response = await runWith(mockRun, "greeting=Hello {0}\n");
+
+		expect(response.status).toBe(200);
+		expect(mockRun.mock.calls[0][0]).toBe('@cf/meta/m2m100-1.2b');
+		// Masked, as the default path has always done.
+		expect(mockRun.mock.calls[0][1].text).toBe('Hello XQZ0');
+	});
+
+	it('rejects an unknown model', async () => {
+		const response = await runWith(vi.fn(), "greeting=Hello\n", 'gpt-9');
+
+		expect(response.status).toBe(400);
+		expect(await response.text()).toContain('Unsupported model');
+	});
+
+	it('fails the entry when the model drops a placeholder', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ response: 'Bonjour' });
+
+		const response = await runWith(mockRun, "greeting=Hello {0}\n", 'llama');
+
+		// Same contract as the masked path: never ship a value with a placeholder
+		// silently missing.
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe("greeting=Hello {0}\n");
+		expect(response.headers.get('X-Translation-Failures')).toBe('1');
+	});
+
+	it('fails the entry when a repeated placeholder comes back only once', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ response: 'Bonjour {0}' });
+
+		const response = await runWith(mockRun, "greeting=Hello {0} and {0}\n", 'llama');
+
+		expect(await response.text()).toBe("greeting=Hello {0} and {0}\n");
+		expect(response.headers.get('X-Translation-Failures')).toBe('1');
+	});
+
+	it('strips conversational scaffolding from the reply', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ response: '  Translation: "Bonjour {0}"  ' });
+
+		const response = await runWith(mockRun, "greeting=Hello {0}\n", 'llama');
+
+		expect(await response.text()).toBe("greeting=Bonjour {0}\n");
+	});
+
+	it('leaves quotes that belong to the string alone', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ response: 'Il a dit "bonjour" {0}' });
+
+		const response = await runWith(mockRun, "greeting=He said \"hello\" {0}\n", 'llama');
+
+		expect(await response.text()).toBe("greeting=Il a dit \"bonjour\" {0}\n");
 	});
 });
