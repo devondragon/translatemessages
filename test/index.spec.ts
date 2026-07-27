@@ -827,7 +827,9 @@ describe('CORS', () => {
 // can be compared against m2m100 on identical input. See scripts/compare-models.mjs.
 describe('llama backend (experimental)', () => {
 	function runWith(mockRun: ReturnType<typeof vi.fn>, content: string, model?: string) {
-		const mockEnv = { ...env, AI: { run: mockRun } };
+		// ReturnType<typeof vi.fn> is wider than the Ai.run signature, so the shared
+		// helper needs the cast the inline mocks above get for free from inference.
+		const mockEnv = { ...env, AI: { run: mockRun } } as unknown as Env;
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
 			body: buildForm(content, 'fr', model)
