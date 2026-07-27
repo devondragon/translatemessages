@@ -299,28 +299,28 @@ describe('maskPlaceholders', () => {
 	it('masks simple numbered placeholders', () => {
 		const counter = { current: 0 };
 		const result = maskPlaceholders('Hello {0}!', counter);
-		expect(result.text).toBe('Hello __PH_0__!');
-		expect(result.tokens).toEqual([{ marker: '__PH_0__', original: '{0}' }]);
+		expect(result.text).toBe('Hello XQZ0!');
+		expect(result.tokens).toEqual([{ marker: 'XQZ0', original: '{0}' }]);
 	});
 
 	it('masks multiple placeholders', () => {
 		const counter = { current: 0 };
 		const result = maskPlaceholders('{0} and {1}', counter);
-		expect(result.text).toBe('__PH_0__ and __PH_1__');
+		expect(result.text).toBe('XQZ0 and XQZ1');
 		expect(result.tokens).toHaveLength(2);
 	});
 
 	it('masks Spring-style placeholders', () => {
 		const counter = { current: 0 };
 		const result = maskPlaceholders('Hello ${user.name}!', counter);
-		expect(result.text).toBe('Hello __PH_0__!');
+		expect(result.text).toBe('Hello XQZ0!');
 		expect(result.tokens[0].original).toBe('${user.name}');
 	});
 
 	it('masks printf-style placeholders', () => {
 		const counter = { current: 0 };
 		const result = maskPlaceholders('Value: %s', counter);
-		expect(result.text).toBe('Value: __PH_0__');
+		expect(result.text).toBe('Value: XQZ0');
 		expect(result.tokens[0].original).toBe('%s');
 	});
 
@@ -333,7 +333,7 @@ describe('maskPlaceholders', () => {
 	it('preserves counter across calls', () => {
 		const counter = { current: 5 };
 		const result = maskPlaceholders('{0}', counter);
-		expect(result.tokens[0].marker).toBe('__PH_5__');
+		expect(result.tokens[0].marker).toBe('XQZ5');
 		expect(counter.current).toBe(6);
 	});
 
@@ -347,22 +347,22 @@ describe('maskPlaceholders', () => {
 
 describe('restorePlaceholders', () => {
 	it('restores simple placeholder', () => {
-		const tokens: PlaceholderToken[] = [{ marker: '__PH_0__', original: '{0}' }];
-		const result = restorePlaceholders('Bonjour __PH_0__!', tokens);
+		const tokens: PlaceholderToken[] = [{ marker: 'XQZ0', original: '{0}' }];
+		const result = restorePlaceholders('Bonjour XQZ0!', tokens);
 		expect(result).toBe('Bonjour {0}!');
 	});
 
 	it('restores multiple placeholders', () => {
 		const tokens: PlaceholderToken[] = [
-			{ marker: '__PH_0__', original: '{0}' },
-			{ marker: '__PH_1__', original: '{1}' }
+			{ marker: 'XQZ0', original: '{0}' },
+			{ marker: 'XQZ1', original: '{1}' }
 		];
-		const result = restorePlaceholders('__PH_0__ et __PH_1__', tokens);
+		const result = restorePlaceholders('XQZ0 et XQZ1', tokens);
 		expect(result).toBe('{0} et {1}');
 	});
 
 	it('handles missing markers gracefully', () => {
-		const tokens: PlaceholderToken[] = [{ marker: '__PH_0__', original: '{0}' }];
+		const tokens: PlaceholderToken[] = [{ marker: 'XQZ0', original: '{0}' }];
 		const result = restorePlaceholders('No markers here', tokens);
 		expect(result).toBe('No markers here');
 	});
@@ -370,6 +370,17 @@ describe('restorePlaceholders', () => {
 	it('handles empty tokens array', () => {
 		const result = restorePlaceholders('Hello World', []);
 		expect(result).toBe('Hello World');
+	});
+
+	it('does not let a short marker consume the prefix of a longer one', () => {
+		// XQZ1 is a prefix of XQZ10, and the markers carry no terminator. Restoring in
+		// token order would rewrite XQZ10 into "{1}0".
+		const tokens: PlaceholderToken[] = [
+			{ marker: 'XQZ1', original: '{1}' },
+			{ marker: 'XQZ10', original: '{10}' }
+		];
+		const result = restorePlaceholders('XQZ10 then XQZ1', tokens);
+		expect(result).toBe('{10} then {1}');
 	});
 });
 

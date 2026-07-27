@@ -217,8 +217,10 @@ describe('TranslateMessages Worker', () => {
 	});
 
 	it('unescapes and re-escapes property values during translation', async () => {
+		// The masked tab comes back as its marker, not as a raw tab: a model that
+		// returns the tab verbatim has destroyed the marker, which is a failed entry.
 		const mockRun = vi.fn()
-			.mockResolvedValueOnce({ translated_text: 'Salut monde!\u00E9\tLigne\\Cassé' });
+			.mockResolvedValueOnce({ translated_text: 'Salut monde!\u00E9XQZ0Ligne\\Cassé' });
 
 		const mockEnv = {
 			...env,
@@ -274,7 +276,7 @@ describe('TranslateMessages Worker', () => {
 
 	it('protects placeholder tokens during translation', async () => {
 		const mockRun = vi.fn()
-			.mockResolvedValueOnce({ translated_text: 'Salut __PH_0__! __PH_1__ __PH_2__' });
+			.mockResolvedValueOnce({ translated_text: 'Salut XQZ0! XQZ1 XQZ2' });
 
 		const mockEnv = {
 			...env,
@@ -559,11 +561,57 @@ describe('TranslateMessages Worker', () => {
 		expect(response.status).toBe(200);
 	});
 
+	it('falls back to the original when the model mangles a placeholder marker', async () => {
+		// The real m2m100 model did exactly this to the old __PH_n__ markers, returning
+		// PH_0 / _PH_0__ / PH_0__ roughly half the time. Restoration matches exactly, so
+		// the placeholder used to vanish and literal marker debris shipped in its place.
+		const mockRun = vi.fn().mockImplementation((_model, args) =>
+			Promise.resolve({ translated_text: args.text.replace(/XQZ(\d+)/g, 'PH_$1') })
+		);
+		const mockEnv = { ...env, AI: { run: mockRun } };
+
+		const fileContent = "greeting=Hello {0}\n";
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm(fileContent, 'fr')
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		// Untranslated but intact beats translated with {0} destroyed, and the user is
+		// told rather than left to discover it in production.
+		expect(await response.text()).toBe(fileContent);
+		expect(response.headers.get('X-Translation-Failures')).toBe('1');
+	});
+
+	it('restores double-digit placeholders without clobbering single-digit ones', async () => {
+		// Markers carry no terminator, so XQZ1 is a prefix of XQZ10 and restoring in
+		// token order would consume it and strand a loose "0".
+		const mockRun = vi.fn().mockImplementation((_model, args) =>
+			Promise.resolve({ translated_text: args.text })
+		);
+		const mockEnv = { ...env, AI: { run: mockRun } };
+
+		const values = Array.from({ length: 12 }, (_, i) => `{${i}}`).join(' ');
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm(`many=${values}\n`, 'fr')
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe(`many=${values}\n`);
+	});
+
 	it('leaves entries containing the placeholder marker untranslated', async () => {
 		const mockRun = vi.fn().mockResolvedValue({ translated_text: 'Bonjour' });
 		const mockEnv = { ...env, AI: { run: mockRun } };
 
-		const fileContent = "literal=Value with __PH_0__ inside\n";
+		const fileContent = "literal=Value with XQZ0 inside\n";
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
 			body: buildForm(fileContent, 'fr')
