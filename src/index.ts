@@ -19,6 +19,11 @@ export interface PlaceholderToken {
 export interface MaskedSegment {
 	text: string;
 	tokens: PlaceholderToken[];
+	// Placeholders deliberately left in the text for an instruction-following model to
+	// copy verbatim, rather than masked behind a marker. Verified after translation
+	// exactly as markers are, so both backends fail the same way when a placeholder
+	// does not survive.
+	literalPlaceholders: string[];
 }
 
 // Supported language codes for m2m100 model
@@ -47,6 +52,18 @@ const SEGMENT_DELIMITER = "__SEG__";
 // XQZ<n> round-tripped intact in fr/es/de/ja/zh, next to punctuation, inside
 // parentheses, and across double-digit indexes.
 const PLACEHOLDER_MARKER_PREFIX = "XQZ";
+
+// Translation backends. m2m100 is the default and the only one the frontend uses;
+// llama is opt-in via the `model` form field so its output quality can be compared
+// against m2m100 on the same input. It needs no placeholder masking, which is the
+// hypothesis being tested -- see PLACEHOLDER_MARKER_PREFIX for why masking is
+// fragile against a model that rewrites rare tokens.
+const M2M_MODEL = "@cf/meta/m2m100-1.2b";
+const LLAMA_MODEL = "@cf/meta/llama-3-8b-instruct-awq";
+
+export type ModelChoice = "m2m100" | "llama";
+export const MODEL_CHOICES: ModelChoice[] = ["m2m100", "llama"];
+const DEFAULT_MODEL: ModelChoice = "m2m100";
 
 // m2m100 degenerates on very short inputs: "Hi XQZ0" comes back with the marker
 // dropped entirely, while "Hi XQZ0." translates correctly and keeps it. Measured
@@ -185,9 +202,17 @@ async function handleTranslation(request: Request, env: Env): Promise<Response> 
 		return new Response(`Unsupported language code: ${language}. Supported languages: ${SUPPORTED_LANGUAGES.join(", ")}`, { status: 400 });
 	}
 
+	// EXPERIMENTAL, and absent from the frontend on purpose: this exists so the two
+	// backends can be compared on identical input. Omitting it keeps today's behaviour.
+	const modelEntry = formData.get("model");
+	if (modelEntry !== null && (typeof modelEntry !== "string" || !MODEL_CHOICES.includes(modelEntry as ModelChoice))) {
+		return new Response(`Unsupported model. Choose one of: ${MODEL_CHOICES.join(", ")}.`, { status: 400 });
+	}
+	const model = (modelEntry as ModelChoice | null) ?? DEFAULT_MODEL;
+
 	const text = await file.text();
 
-	const { translatedText, failedEntries, attemptedEntries, serviceErrors } = await translateMessages(text, languageCode, env);
+	const { translatedText, failedEntries, attemptedEntries, serviceErrors } = await translateMessages(text, languageCode, env, model);
 
 	// Every attempted entry erroring at the API means the model or binding is down,
 	// not that a few awkward strings tripped it up, so fail loudly rather than hand
@@ -220,7 +245,7 @@ interface TranslationResult {
 	attemptedEntries: number;
 }
 
-async function translateMessages(text: string, targetLanguage: string, env: Env): Promise<TranslationResult> {
+async function translateMessages(text: string, targetLanguage: string, env: Env, model: ModelChoice): Promise<TranslationResult> {
 	const newline = text.includes("\r\n") ? "\r\n" : "\n";
 	const normalizedText = text.replace(/\r\n?/g, "\n");
 	const lines = normalizedText.split("\n");
@@ -240,7 +265,7 @@ async function translateMessages(text: string, targetLanguage: string, env: Env)
 		const batch = entries.slice(i, i + BATCH_SIZE);
 		const translationPromises = batch.map(async (entry) => {
 			const entryLines = entry.indexes.map((idx) => lines[idx]);
-			const { translatedLines: translatedEntryLines, failed, attempted, serviceError } = await translateEntry(entryLines, targetLanguage, env);
+			const { translatedLines: translatedEntryLines, failed, attempted, serviceError } = await translateEntry(entryLines, targetLanguage, env, model);
 			return { entry, translatedEntryLines, failed, attempted, serviceError };
 		});
 		const batchResults = await Promise.all(translationPromises);
@@ -265,10 +290,14 @@ async function translateMessages(text: string, targetLanguage: string, env: Env)
 	return { translatedText, failedEntries, attemptedEntries, serviceErrors };
 }
 
-async function translateText(text: string, targetLanguage: string, env: Env): Promise<string> {
+async function translateText(text: string, targetLanguage: string, env: Env, model: ModelChoice): Promise<string> {
 	try {
+		if (model === "llama") {
+			return await translateWithInstructModel(text, targetLanguage, env);
+		}
+
 		const response = await env.AI.run(
-			"@cf/meta/m2m100-1.2b",
+			M2M_MODEL,
 			{
 				text: text,
 				source_lang: "en",
@@ -280,9 +309,70 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 	} catch (error) {
 		logError("translation_api_error", {
 			targetLanguage,
+			model,
 			error: error instanceof Error ? error.message : String(error)
 		});
 		throw new Error(`Translation service failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+	}
+}
+
+// EXPERIMENTAL. Reached only via the `model=llama` form field; the default path is
+// unchanged. An instruction-following model needs no placeholder masking -- it is
+// told to copy placeholders verbatim and the result is verified the same way the
+// masked path is -- which is the whole point of the comparison.
+async function translateWithInstructModel(text: string, targetLanguage: string, env: Env): Promise<string> {
+	const response = await env.AI.run(
+		LLAMA_MODEL,
+		{
+			messages: [
+				{ role: "system", content: instructSystemPrompt(targetLanguage) },
+				{ role: "user", content: text }
+			],
+			// Deterministic output, so a rerun of the comparison is reproducible.
+			temperature: 0,
+			max_tokens: 1024
+		} as never
+	) as { response?: string };
+
+	return cleanInstructOutput(response.response ?? "");
+}
+
+function instructSystemPrompt(targetLanguage: string): string {
+	const languageName = describeLanguage(targetLanguage);
+	return [
+		`You translate strings from a Java .properties file from English into ${languageName}.`,
+		"",
+		"Rules:",
+		"- Reply with the translation only. No quotes, no preamble, no explanation, no notes.",
+		"- Copy every placeholder exactly as written, including {0}, {1}, ${name}, %s and %d.",
+		`- Copy any ${SEGMENT_DELIMITER} token exactly; it separates parts of one string.`,
+		`- Copy any ${PLACEHOLDER_MARKER_PREFIX} token followed by digits exactly.`,
+		"- Translate the wording only. Do not add, drop or reorder content.",
+		"- If the input is a single word or fragment, translate it as-is."
+	].join("\n");
+}
+
+// Small instruct models leak conversational scaffolding even when told not to.
+// Stripping it here keeps the comparison about translation quality rather than
+// about prompt obedience.
+function cleanInstructOutput(raw: string): string {
+	let text = raw.trim();
+	text = text.replace(/^(?:translation|traduction|output)\s*:\s*/i, "");
+	// Unwrap a fully quoted response, but leave quotes that are part of the string.
+	const quoted = text.match(/^"([\s\S]*)"$/) ?? text.match(/^'([\s\S]*)'$/);
+	if (quoted && !quoted[1].includes('"')) {
+		text = quoted[1];
+	}
+	return text.trim();
+}
+
+function describeLanguage(code: string): string {
+	try {
+		const name = new Intl.DisplayNames(["en"], { type: "language" }).of(code);
+		// Intl echoes the input back when it has no name for the code.
+		return name && name !== code ? name : `the language with ISO code "${code}"`;
+	} catch {
+		return `the language with ISO code "${code}"`;
 	}
 }
 
@@ -293,10 +383,11 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 async function translateSegments(
 	combinedValue: string,
 	maskedSegments: MaskedSegment[],
+	model: ModelChoice,
 	targetLanguage: string,
 	env: Env
 ): Promise<string[] | null> {
-	const translatedCombined = await translateText(combinedValue, targetLanguage, env);
+	const translatedCombined = await translateText(combinedValue, targetLanguage, env, model);
 	const translatedSegments = translatedCombined.split(SEGMENT_DELIMITER).map(normalizeMarkers);
 
 	if (translatedSegments.length !== maskedSegments.length) {
@@ -307,7 +398,7 @@ async function translateSegments(
 	// just as unrestorable as one it mangled, since each segment is restored with
 	// only its own tokens.
 	const lostMarkers = maskedSegments.some(
-		(masked, idx) => !markersSurvived(translatedSegments[idx], masked.tokens)
+		(masked, idx) => !markersSurvived(translatedSegments[idx], masked)
 	);
 
 	return lostMarkers ? null : translatedSegments;
@@ -326,7 +417,7 @@ interface EntryTranslationResult {
 	serviceError: boolean;
 }
 
-async function translateEntry(lines: string[], targetLanguage: string, env: Env): Promise<EntryTranslationResult> {
+async function translateEntry(lines: string[], targetLanguage: string, env: Env, model: ModelChoice): Promise<EntryTranslationResult> {
 	const firstLine = lines[0];
 	const trimmedFirstLine = firstLine.trim();
 
@@ -362,14 +453,14 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 	}
 
 	const placeholderCounter = { current: 0 };
-	const maskedSegments = unescapedValues.map(value => maskPlaceholders(value, placeholderCounter));
+	const maskedSegments = unescapedValues.map(value => maskPlaceholders(value, placeholderCounter, model !== "llama"));
 	// A trailing space keeps the delimiter from fusing to the following word, which
 	// left that word untranslated. Continuation values already end with a space
 	// before their backslash, so the left-hand side needs no padding.
 	const combinedValue = maskedSegments.map(segment => segment.text).join(`${SEGMENT_DELIMITER} `);
 
 	try {
-		let translatedSegments = await translateSegments(combinedValue, maskedSegments, targetLanguage, env);
+		let translatedSegments = await translateSegments(combinedValue, maskedSegments, model, targetLanguage, env);
 
 		// The model is deterministic -- the same input loses the same marker every
 		// time -- so a plain retry is guaranteed to waste a call. Perturbing the input
@@ -378,7 +469,7 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 		let addedRetryTerminator = false;
 		if (!translatedSegments && !ENDS_WITH_TERMINATOR.test(combinedValue)) {
 			translatedSegments = await translateSegments(
-				`${combinedValue}${RETRY_TERMINATOR}`, maskedSegments, targetLanguage, env
+				`${combinedValue}${RETRY_TERMINATOR}`, maskedSegments, model, targetLanguage, env
 			);
 			addedRetryTerminator = translatedSegments !== null;
 		}
@@ -722,7 +813,14 @@ function escapePropertiesText(value: string): string {
 	return result.join("");
 }
 
-function maskPlaceholders(value: string, counter: { current: number }): MaskedSegment {
+function maskPlaceholders(
+	value: string,
+	counter: { current: number },
+	// False for an instruction-following model, which is asked to copy placeholders
+	// rather than have them hidden behind markers. Control characters are masked
+	// either way: no model reliably round-trips a raw tab or newline.
+	maskPlaceholderTokens = true
+): MaskedSegment {
 	const tokens: PlaceholderToken[] = [];
 	const mask = (match: string) => {
 		const marker = `${PLACEHOLDER_MARKER_PREFIX}${counter.current++}`;
@@ -730,11 +828,11 @@ function maskPlaceholders(value: string, counter: { current: number }): MaskedSe
 		return marker;
 	};
 
-	const text = value
-		.replace(PLACEHOLDER_REGEX, mask)
+	const literalPlaceholders = maskPlaceholderTokens ? [] : (value.match(PLACEHOLDER_REGEX) ?? []);
+	const text = (maskPlaceholderTokens ? value.replace(PLACEHOLDER_REGEX, mask) : value)
 		.replace(CONTROL_CHAR_REGEX, mask);
 
-	return { text, tokens };
+	return { text, tokens, literalPlaceholders };
 }
 
 function restorePlaceholders(text: string, tokens: PlaceholderToken[]): string {
@@ -765,8 +863,19 @@ function normalizeMarkers(text: string): string {
 // never be matched and its placeholder would vanish from the output without trace.
 // Checking first turns that silent corruption into an ordinary entry failure, which
 // falls back to the untranslated original and is reported via X-Translation-Failures.
-function markersSurvived(text: string, tokens: PlaceholderToken[]): boolean {
-	return tokens.every(token => text.includes(token.marker));
+function markersSurvived(text: string, masked: MaskedSegment): boolean {
+	// Counted rather than merely present: a value with two identical placeholders
+	// must come back with both, not with one silently dropped.
+	const literalsSurvived = masked.literalPlaceholders.every(placeholder => {
+		const needed = masked.literalPlaceholders.filter(entry => entry === placeholder).length;
+		return occurrences(text, placeholder) >= needed;
+	});
+
+	return literalsSurvived && masked.tokens.every(token => text.includes(token.marker));
+}
+
+function occurrences(haystack: string, needle: string): number {
+	return needle ? haystack.split(needle).length - 1 : 0;
 }
 
 // Export parsing functions for testing
