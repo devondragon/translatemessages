@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Production deploys are manual and explicit: run this workflow from the
+  # Actions tab on main. Nothing deploys to production automatically.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -70,6 +73,41 @@ jobs:
 
       - name: Deploy to staging
         run: npx wrangler deploy --env staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+  # Manual production deploy. Runs only via workflow_dispatch on main, so a
+  # merge never ships to production on its own. Records the commit SHA on the
+  # deployed version so it is possible to tell what production is running.
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: test
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    environment: production
+    permissions:
+      contents: read
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy to production
+        run: |
+          npx wrangler deploy \
+            --tag "$GITHUB_SHA" \
+            --message "Deployed from main @ ${GITHUB_SHA:0:7} by @${GITHUB_ACTOR}"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
