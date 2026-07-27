@@ -382,6 +382,18 @@ function instructSystemPrompt(targetLanguage: string): string {
 function cleanInstructOutput(raw: string): string {
 	let text = raw.trim();
 	text = text.replace(/^(?:translation|traduction|output)\s*:\s*/i, "");
+
+	// A value can never legitimately contain a raw newline at this point: real newlines
+	// in the source were masked as control characters, and multi-line entries are joined
+	// with SEGMENT_DELIMITER rather than newlines. So anything past the first line is
+	// the model talking to us -- observed as
+	// `Saw\n\n(No change, as "Save" is a single word)` landing in the output file.
+	// Note this cannot catch a note the model appends on the same line.
+	const firstLineBreak = text.search(/[\r\n]/);
+	if (firstLineBreak !== -1) {
+		text = text.slice(0, firstLineBreak);
+	}
+
 	// Unwrap a fully quoted response, but leave quotes that are part of the string.
 	const quoted = text.match(/^"([\s\S]*)"$/) ?? text.match(/^'([\s\S]*)'$/);
 	if (quoted && !quoted[1].includes('"')) {
@@ -400,15 +412,17 @@ function describeLanguage(code: string): string {
 	}
 }
 
-// One translation attempt: returns the per-segment text with every marker present
-// and canonical, or null if the result is unusable and the caller should give up or
-// retry. Never returns a partially usable result -- a caller that wrote one out
-// would be shipping a file with placeholders silently missing.
+// One translation attempt: returns the fully restored per-segment values, or null if
+// the result is unusable and the caller should give up or retry. Never returns a
+// partially usable result -- a caller that wrote one out would be shipping a file
+// with placeholders missing, invented, or with model commentary in them.
 async function translateSegments(
 	combinedValue: string,
 	maskedSegments: MaskedSegment[],
+	sourceValues: string[],
 	model: ModelChoice,
 	targetLanguage: string,
+	stripTrailingTerminator: boolean,
 	env: Env
 ): Promise<string[] | null> {
 	const translatedCombined = await translateText(combinedValue, targetLanguage, env, model);
@@ -424,8 +438,52 @@ async function translateSegments(
 	const lostMarkers = maskedSegments.some(
 		(masked, idx) => !markersSurvived(translatedSegments[idx], masked)
 	);
+	if (lostMarkers) {
+		return null;
+	}
 
-	return lostMarkers ? null : translatedSegments;
+	const lastIndex = maskedSegments.length - 1;
+	const restored = translatedSegments.map((segment, idx) => {
+		// Drop the padding space introduced by the join. Continuation values never
+		// begin with whitespace (parseContinuationLine moves it into the prefix), so
+		// any leading whitespace here is an artifact.
+		const withoutJoinPadding = idx === 0 ? segment : segment.replace(/^[ \t]+/, "");
+		// Remove only a terminator we introduced ourselves, and only from the tail
+		// segment where it was appended. Punctuation the model chose is left alone.
+		const withoutRetryTerminator = stripTrailingTerminator && idx === lastIndex
+			? withoutJoinPadding.replace(RETRY_TERMINATOR_REGEX, "")
+			: withoutJoinPadding;
+		return restorePlaceholders(withoutRetryTerminator, maskedSegments[idx].tokens);
+	});
+
+	// Verified against the restored value rather than the raw reply, because that is
+	// what actually reaches the file. An instruction-following model will invent a
+	// placeholder that was never in the source -- observed in the low-resource sweep,
+	// where a value with no placeholder came back containing {0} -- and a literal {0}
+	// in a Spring message is a production bug, not a cosmetic one.
+	const inventedPlaceholders = restored.some((value, idx) => hasUnexpectedPlaceholders(sourceValues[idx], value));
+
+	return inventedPlaceholders ? null : restored;
+}
+
+// True when the translation carries a placeholder the source did not, or carries one
+// more times than the source did.
+function hasUnexpectedPlaceholders(sourceValue: string, translatedValue: string): boolean {
+	const allowed = new Map<string, number>();
+	for (const placeholder of sourceValue.match(PLACEHOLDER_REGEX) ?? []) {
+		allowed.set(placeholder, (allowed.get(placeholder) ?? 0) + 1);
+	}
+
+	const seen = new Map<string, number>();
+	for (const placeholder of translatedValue.match(PLACEHOLDER_REGEX) ?? []) {
+		const count = (seen.get(placeholder) ?? 0) + 1;
+		seen.set(placeholder, count);
+		if (count > (allowed.get(placeholder) ?? 0)) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 interface EntryTranslationResult {
@@ -484,21 +542,21 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env,
 	const combinedValue = maskedSegments.map(segment => segment.text).join(`${SEGMENT_DELIMITER} `);
 
 	try {
-		let translatedSegments = await translateSegments(combinedValue, maskedSegments, model, targetLanguage, env);
+		let restoredValues = await translateSegments(
+			combinedValue, maskedSegments, unescapedValues, model, targetLanguage, false, env
+		);
 
 		// The model is deterministic -- the same input loses the same marker every
 		// time -- so a plain retry is guaranteed to waste a call. Perturbing the input
 		// is what actually changes the outcome, and only for an entry that would
 		// otherwise ship untranslated.
-		let addedRetryTerminator = false;
-		if (!translatedSegments && !ENDS_WITH_TERMINATOR.test(combinedValue)) {
-			translatedSegments = await translateSegments(
-				`${combinedValue}${RETRY_TERMINATOR}`, maskedSegments, model, targetLanguage, env
+		if (!restoredValues && !ENDS_WITH_TERMINATOR.test(combinedValue)) {
+			restoredValues = await translateSegments(
+				`${combinedValue}${RETRY_TERMINATOR}`, maskedSegments, unescapedValues, model, targetLanguage, true, env
 			);
-			addedRetryTerminator = translatedSegments !== null;
 		}
 
-		if (!translatedSegments) {
+		if (!restoredValues) {
 			logError("entry_translation_unusable", {
 				entryKey: firstLine.split(/[=:\s]/)[0]?.trim() || "unknown",
 				targetLanguage
@@ -506,21 +564,8 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env,
 			return { translatedLines: lines, failed: true, attempted: true, serviceError: false };
 		}
 
-		const lastIndex = segments.length - 1;
 		const translatedLines = segments.map((segment, idx) => {
-			// Drop the padding space introduced by the join. Continuation values never
-			// begin with whitespace (parseContinuationLine moves it into the prefix),
-			// so any leading whitespace here is an artifact.
-			const translatedSegment = idx === 0
-				? translatedSegments[idx]
-				: translatedSegments[idx].replace(/^[ \t]+/, "");
-			// Remove only a terminator we introduced ourselves, and only from the tail
-			// segment where it was appended. Punctuation the model chose is left alone.
-			const withoutRetryTerminator = addedRetryTerminator && idx === lastIndex
-				? translatedSegment.replace(RETRY_TERMINATOR_REGEX, "")
-				: translatedSegment;
-			const restoredPlaceholders = restorePlaceholders(withoutRetryTerminator, maskedSegments[idx].tokens);
-			const escapedValue = escapePropertiesText(restoredPlaceholders);
+			const escapedValue = escapePropertiesText(restoredValues[idx]);
 			return `${segment.prefix}${escapedValue}${segment.suffix}`;
 		});
 		return { translatedLines, failed: false, attempted: true, serviceError: false };

@@ -903,6 +903,44 @@ describe('llama backend (experimental)', () => {
 		expect(await response.text()).toBe("greeting=Bonjour {0}\n");
 	});
 
+	it('rejects a placeholder the model invented', async () => {
+		// Observed in the low-resource sweep: a source value with no placeholder came
+		// back as "Welcoming ngal laawol \u0257uniyaarum {0}". A literal {0} reaching a
+		// Spring message is a production bug, so the entry must fall back instead.
+		const mockRun = vi.fn().mockResolvedValue({ response: 'Welcoming ngal laawol {0}' });
+
+		const fileContent = "app.welcome=Welcome to your dashboard\n";
+		const response = await runWith(mockRun, fileContent, 'llama-3.1-8b');
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe(fileContent);
+		expect(response.headers.get('X-Translation-Failures')).toBe('1');
+	});
+
+	it('rejects a duplicated placeholder the source used only once', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ response: 'Bonjour {0} et {0}' });
+
+		const fileContent = "greeting=Hello {0}\n";
+		const response = await runWith(mockRun, fileContent, 'llama-3.1-8b');
+
+		expect(await response.text()).toBe(fileContent);
+		expect(response.headers.get('X-Translation-Failures')).toBe('1');
+	});
+
+	it('drops commentary the model appends after the translation', async () => {
+		// Observed verbatim: `Saw\n\n(No change, as "Save" is a single word)` was written
+		// into the value. A value cannot contain a raw newline at that point, so
+		// anything past the first line is the model talking to us.
+		const mockRun = vi.fn().mockResolvedValue({
+			response: 'Sauvegarder\n\n(No change, as "Save" is a single word)'
+		});
+
+		const response = await runWith(mockRun, "button.save=Save\n", 'llama-3.1-8b');
+
+		expect(await response.text()).toBe("button.save=Sauvegarder\n");
+		expect(response.headers.get('X-Translation-Failures')).toBeNull();
+	});
+
 	it('leaves quotes that belong to the string alone', async () => {
 		const mockRun = vi.fn().mockResolvedValue({ response: 'Il a dit "bonjour" {0}' });
 
