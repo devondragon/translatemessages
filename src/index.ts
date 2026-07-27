@@ -54,16 +54,35 @@ const SEGMENT_DELIMITER = "__SEG__";
 const PLACEHOLDER_MARKER_PREFIX = "XQZ";
 
 // Translation backends. m2m100 is the default and the only one the frontend uses;
-// llama is opt-in via the `model` form field so its output quality can be compared
-// against m2m100 on the same input. It needs no placeholder masking, which is the
-// hypothesis being tested -- see PLACEHOLDER_MARKER_PREFIX for why masking is
-// fragile against a model that rewrites rare tokens.
-const M2M_MODEL = "@cf/meta/m2m100-1.2b";
-const LLAMA_MODEL = "@cf/meta/llama-3-8b-instruct-awq";
+// the rest are opt-in via the `model` form field so their output can be compared
+// against m2m100 on identical input. See PLACEHOLDER_MARKER_PREFIX for why masking
+// is fragile against a model that rewrites rare tokens -- avoiding it is the point.
+//
+// A registry rather than a single alternative, because Workers AI retires models on
+// its own schedule -- llama-3-8b-instruct-awq was deprecated out from under this
+// experiment mid-flight, and the generated types still list it. Candidates are named
+// independently of their model IDs so a retirement is a one-line swap.
+//
+// "seq2seq" models translate text directly and need placeholders masked behind
+// markers. "instruct" models are told to copy placeholders verbatim, which is the
+// hypothesis this registry exists to test.
+const TRANSLATION_MODELS = {
+	"m2m100": { id: "@cf/meta/m2m100-1.2b", kind: "seq2seq" },
+	"llama-3.1-8b": { id: "@cf/meta/llama-3.1-8b-instruct-fp8", kind: "instruct" },
+	"llama-3.2-3b": { id: "@cf/meta/llama-3.2-3b-instruct", kind: "instruct" },
+	"llama-3.3-70b": { id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", kind: "instruct" },
+	"llama-4-scout": { id: "@cf/meta/llama-4-scout-17b-16e-instruct", kind: "instruct" },
+	"gemma-3-12b": { id: "@cf/google/gemma-3-12b-it", kind: "instruct" },
+	"mistral-small-3.1": { id: "@cf/mistralai/mistral-small-3.1-24b-instruct", kind: "instruct" }
+} as const;
 
-export type ModelChoice = "m2m100" | "llama";
-export const MODEL_CHOICES: ModelChoice[] = ["m2m100", "llama"];
+export type ModelChoice = keyof typeof TRANSLATION_MODELS;
+export const MODEL_CHOICES = Object.keys(TRANSLATION_MODELS) as ModelChoice[];
 const DEFAULT_MODEL: ModelChoice = "m2m100";
+
+function usesInstructPrompting(model: ModelChoice): boolean {
+	return TRANSLATION_MODELS[model].kind === "instruct";
+}
 
 // m2m100 degenerates on very short inputs: "Hi XQZ0" comes back with the marker
 // dropped entirely, while "Hi XQZ0." translates correctly and keeps it. Measured
@@ -292,12 +311,12 @@ async function translateMessages(text: string, targetLanguage: string, env: Env,
 
 async function translateText(text: string, targetLanguage: string, env: Env, model: ModelChoice): Promise<string> {
 	try {
-		if (model === "llama") {
-			return await translateWithInstructModel(text, targetLanguage, env);
+		if (usesInstructPrompting(model)) {
+			return await translateWithInstructModel(text, targetLanguage, env, model);
 		}
 
 		const response = await env.AI.run(
-			M2M_MODEL,
+			TRANSLATION_MODELS[model].id,
 			{
 				text: text,
 				source_lang: "en",
@@ -320,9 +339,14 @@ async function translateText(text: string, targetLanguage: string, env: Env, mod
 // unchanged. An instruction-following model needs no placeholder masking -- it is
 // told to copy placeholders verbatim and the result is verified the same way the
 // masked path is -- which is the whole point of the comparison.
-async function translateWithInstructModel(text: string, targetLanguage: string, env: Env): Promise<string> {
+async function translateWithInstructModel(
+	text: string,
+	targetLanguage: string,
+	env: Env,
+	model: ModelChoice
+): Promise<string> {
 	const response = await env.AI.run(
-		LLAMA_MODEL,
+		TRANSLATION_MODELS[model].id,
 		{
 			messages: [
 				{ role: "system", content: instructSystemPrompt(targetLanguage) },
@@ -453,7 +477,7 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env,
 	}
 
 	const placeholderCounter = { current: 0 };
-	const maskedSegments = unescapedValues.map(value => maskPlaceholders(value, placeholderCounter, model !== "llama"));
+	const maskedSegments = unescapedValues.map(value => maskPlaceholders(value, placeholderCounter, !usesInstructPrompting(model)));
 	// A trailing space keeps the delimiter from fusing to the following word, which
 	// left that word untranslated. Continuation values already end with a space
 	// before their backslash, so the left-hand side needs no padding.

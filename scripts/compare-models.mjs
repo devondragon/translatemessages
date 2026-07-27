@@ -24,19 +24,20 @@ import { basename } from "node:path";
 const DEFAULT_URL = "https://translatemessages-staging.justblackmagic.workers.dev/";
 const DEFAULT_FIXTURE = new URL("./fixtures/comparison.properties", import.meta.url).pathname;
 const DEFAULT_LANGUAGES = ["fr", "es", "de", "ja"];
-const MODELS = ["m2m100", "llama"];
+// m2m100 first so it reads as the baseline every other column is judged against.
+const DEFAULT_MODELS = ["m2m100", "llama-3.1-8b"];
 
 // Kept in step with PLACEHOLDER_REGEX in src/index.ts. If they drift, this script
 // will happily report a fidelity score that the Worker does not actually enforce.
 const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]*\$?[-+#0-9.]*[a-zA-Z]/g;
 
 function parseArgs(argv) {
-	const args = { url: DEFAULT_URL, file: DEFAULT_FIXTURE, languages: DEFAULT_LANGUAGES, out: null };
+	const args = { url: DEFAULT_URL, file: DEFAULT_FIXTURE, languages: DEFAULT_LANGUAGES, models: DEFAULT_MODELS, out: null };
 	for (let i = 0; i < argv.length; i += 2) {
 		const key = argv[i]?.replace(/^--/, "");
 		const value = argv[i + 1];
 		if (!key || value === undefined) continue;
-		if (key === "languages") args.languages = value.split(",").map(entry => entry.trim()).filter(Boolean);
+		if (key === "languages" || key === "models") args[key] = value.split(",").map(entry => entry.trim()).filter(Boolean);
 		else if (key in args) args[key] = value;
 	}
 	return args;
@@ -150,9 +151,9 @@ function score(sourceEntries, result) {
 	};
 }
 
-function renderReport({ fixture, url, languages, results }) {
+function renderReport({ fixture, url, languages, models, results }) {
 	const lines = [];
-	lines.push(`# Model comparison: m2m100 vs llama`, "");
+	lines.push(`# Model comparison: ${models.join(" vs ")}`, "");
 	lines.push(`Fixture: \`${basename(fixture)}\` · Endpoint: \`${url}\``, "");
 
 	lines.push(`## Summary`, "");
@@ -161,7 +162,7 @@ function renderReport({ fixture, url, languages, results }) {
 	lines.push(`|---|---|---|---|---|---|---|---|`);
 
 	for (const language of languages) {
-		for (const model of MODELS) {
+		for (const model of models) {
 			const result = results[language][model];
 			if (result.failed) {
 				lines.push(`| ${language} | ${model} | — | — | — | — | — | HTTP ${result.status} |`);
@@ -179,23 +180,29 @@ function renderReport({ fixture, url, languages, results }) {
 	lines.push(`Read this part. The table above cannot tell you whether a translation is good,`);
 	lines.push(`only whether it is structurally intact.`, "");
 
+	const labelWidth = Math.max(...models.map(model => model.length), 2);
+
 	for (const language of languages) {
-		const m2m = results[language].m2m100;
-		const llama = results[language].llama;
 		lines.push(`### ${language}`, "");
-		if (m2m.failed || llama.failed) {
-			lines.push(`One or both backends failed for this language; see the summary.`, "");
+
+		const usable = models.filter(model => !results[language][model].failed);
+		if (usable.length === 0) {
+			lines.push(`Every backend failed for this language; see the summary.`, "");
 			continue;
 		}
+		if (usable.length < models.length) {
+			const broken = models.filter(model => results[language][model].failed);
+			lines.push(`Omitted (request failed): ${broken.join(", ")}.`, "");
+		}
 
-		for (let i = 0; i < m2m.rows.length; i++) {
-			const source = m2m.rows[i];
-			const llamaRow = llama.rows[i];
-			lines.push(`**\`${source.key}\`**`, "");
+		const rowCount = results[language][usable[0]].rows.length;
+		for (let i = 0; i < rowCount; i++) {
+			lines.push(`**\`${results[language][usable[0]].rows[i].key}\`**`, "");
 			lines.push("```");
-			lines.push(`en     ${source.value}`);
-			lines.push(`m2m    ${formatCell(source)}`);
-			lines.push(`llama  ${formatCell(llamaRow)}`);
+			lines.push(`${"en".padEnd(labelWidth)}  ${results[language][usable[0]].rows[i].value}`);
+			for (const model of usable) {
+				lines.push(`${model.padEnd(labelWidth)}  ${formatCell(results[language][model].rows[i])}`);
+			}
 			lines.push("```", "");
 		}
 	}
@@ -216,14 +223,14 @@ async function main() {
 	const content = await readFile(args.file, "utf8");
 	const sourceEntries = parseEntries(content);
 
-	console.error(`Comparing ${MODELS.join(" vs ")} on ${sourceEntries.length} entries across ${args.languages.join(", ")}`);
+	console.error(`Comparing ${args.models.join(" vs ")} on ${sourceEntries.length} entries across ${args.languages.join(", ")}`);
 	console.error(`Endpoint: ${args.url}`);
 
 	const results = {};
 	for (const language of args.languages) {
 		results[language] = {};
 		// Sequential on purpose: concurrent runs would make the latency column noise.
-		for (const model of MODELS) {
+		for (const model of args.models) {
 			process.stderr.write(`  ${language}/${model} ... `);
 			const result = await translate({ url: args.url, content, language, model });
 			results[language][model] = score(sourceEntries, result);
@@ -231,7 +238,7 @@ async function main() {
 		}
 	}
 
-	const report = renderReport({ fixture: args.file, url: args.url, languages: args.languages, results });
+	const report = renderReport({ fixture: args.file, url: args.url, languages: args.languages, models: args.models, results });
 	if (args.out) {
 		await writeFile(args.out, report, "utf8");
 		console.error(`\nWrote ${args.out}`);
