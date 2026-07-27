@@ -1,0 +1,118 @@
+# Production drift check.
+# Deploy-failure alerting cannot catch a production Worker that is simply stale,
+# because nothing fails — production ran 21-month-old code without a single red
+# build. This compares what production is running against what is on main and
+# files an issue when they diverge.
+name: Production drift check
+
+on:
+  schedule:
+    # Mondays, 14:00 UTC
+    - cron: '0 14 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          # Full history so commits since the last deploy can be counted.
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compare production against main
+        id: drift
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          deployed_at=$(npx wrangler deployments list --json | jq -r 'max_by(.created_on).created_on')
+          # Only source changes matter; a README edit is not production drift.
+          src_changed_at=$(git log -1 --format=%cI -- src/)
+
+          echo "Production last deployed: $deployed_at"
+          echo "src/ last changed:        $src_changed_at"
+
+          deployed_epoch=$(date -u -d "$deployed_at" +%s)
+          src_epoch=$(date -u -d "$src_changed_at" +%s)
+
+          {
+            echo "deployed_at=$deployed_at"
+            echo "src_changed_at=$src_changed_at"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$src_epoch" -gt "$deployed_epoch" ]; then
+            behind=$(git log --oneline --since="$deployed_at" -- src/ | wc -l | tr -d ' ')
+            echo "drifted=true" >> "$GITHUB_OUTPUT"
+            echo "behind=$behind" >> "$GITHUB_OUTPUT"
+            echo "DRIFT: production is $behind src commit(s) behind main"
+          else
+            echo "drifted=false" >> "$GITHUB_OUTPUT"
+            echo "No drift: production is current with main"
+          fi
+
+      - name: Open or update the drift issue
+        if: steps.drift.outputs.drifted == 'true'
+        uses: actions/github-script@v9
+        env:
+          DEPLOYED_AT: ${{ steps.drift.outputs.deployed_at }}
+          SRC_CHANGED_AT: ${{ steps.drift.outputs.src_changed_at }}
+          BEHIND: ${{ steps.drift.outputs.behind }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const { DEPLOYED_AT, SRC_CHANGED_AT, BEHIND } = process.env;
+            const body = [
+              'Production is running older code than `main`.',
+              '',
+              `- Production last deployed: \`${DEPLOYED_AT}\``,
+              `- \`src/\` last changed: \`${SRC_CHANGED_AT}\``,
+              `- Unreleased \`src/\` commits: **${BEHIND}**`,
+              '',
+              'Deploy with the **CI** workflow via *Run workflow* on `main`.',
+              '',
+              `Detected by ${runUrl}`,
+            ].join('\n');
+
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: 'open',
+              labels: 'prod-drift',
+            });
+
+            if (open.length > 0) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: open[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title: 'Production is behind main',
+                body,
+                labels: ['prod-drift'],
+              });
+            }
