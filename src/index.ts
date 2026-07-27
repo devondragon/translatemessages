@@ -34,8 +34,14 @@ const SUPPORTED_LANGUAGES = [
 const SEGMENT_DELIMITER = "__SEG__";
 
 // Prefix for the markers that stand in for placeholders during translation.
-// Shares the plain-ASCII requirement described above for SEGMENT_DELIMITER.
-const PLACEHOLDER_MARKER_PREFIX = "__PH_";
+// Shares the plain-ASCII requirement described above for SEGMENT_DELIMITER, and
+// must additionally avoid underscores: the previous __PH_n__ form came back from
+// the model as PH_0, _PH_0__ or PH_0__ roughly half the time, and a mangled marker
+// no longer matches on the way back, so the placeholder it stood for was silently
+// dropped from the output file. A bare alphanumeric token survives instead --
+// XQZ<n> round-tripped intact in fr/es/de/ja/zh, next to punctuation, inside
+// parentheses, and across double-digit indexes.
+const PLACEHOLDER_MARKER_PREFIX = "XQZ";
 
 // Pattern to match placeholders in property values
 const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]*\$?[-+#0-9.]*[a-zA-Z]/g;
@@ -163,13 +169,15 @@ async function handleTranslation(request: Request, env: Env): Promise<Response> 
 
 	const text = await file.text();
 
-	const { translatedText, failedEntries, attemptedEntries } = await translateMessages(text, languageCode, env);
+	const { translatedText, failedEntries, attemptedEntries, serviceErrors } = await translateMessages(text, languageCode, env);
 
-	// Every translatable entry failing means the model or binding is down, not that
-	// a few awkward strings tripped it up, so fail loudly rather than hand back a
-	// file that looks translated but is not. This replaces an eager probe
-	// translation that doubled the AI calls on every single request.
-	if (attemptedEntries > 0 && failedEntries === attemptedEntries) {
+	// Every attempted entry erroring at the API means the model or binding is down,
+	// not that a few awkward strings tripped it up, so fail loudly rather than hand
+	// back a file that looks translated but is not. This replaces an eager probe
+	// translation that doubled the AI calls on every single request. Only true API
+	// errors count: an entry rejected for lost markers still returns the caller's
+	// file, with the failure reported in X-Translation-Failures.
+	if (attemptedEntries > 0 && serviceErrors === attemptedEntries) {
 		return new Response("Translation service error: no entries could be translated.", { status: 500 });
 	}
 
@@ -190,6 +198,7 @@ async function handleTranslation(request: Request, env: Env): Promise<Response> 
 interface TranslationResult {
 	translatedText: string;
 	failedEntries: number;
+	serviceErrors: number;
 	attemptedEntries: number;
 }
 
@@ -201,6 +210,9 @@ async function translateMessages(text: string, targetLanguage: string, env: Env)
 	const entries = buildEntries(lines);
 	const BATCH_SIZE = 100; // Process up to 100 translations concurrently
 	let failedEntries = 0;
+	// Failures caused by the AI call itself throwing, as opposed to a translation
+	// that came back unusable. Only these can mark the whole request as a 500.
+	let serviceErrors = 0;
 	// Entries actually sent to the model. Comments, blank lines and unparseable
 	// lines are skipped rather than attempted, so counting them would make a
 	// comment-heavy file look like a total translation failure.
@@ -210,16 +222,19 @@ async function translateMessages(text: string, targetLanguage: string, env: Env)
 		const batch = entries.slice(i, i + BATCH_SIZE);
 		const translationPromises = batch.map(async (entry) => {
 			const entryLines = entry.indexes.map((idx) => lines[idx]);
-			const { translatedLines: translatedEntryLines, failed, attempted } = await translateEntry(entryLines, targetLanguage, env);
-			return { entry, translatedEntryLines, failed, attempted };
+			const { translatedLines: translatedEntryLines, failed, attempted, serviceError } = await translateEntry(entryLines, targetLanguage, env);
+			return { entry, translatedEntryLines, failed, attempted, serviceError };
 		});
 		const batchResults = await Promise.all(translationPromises);
-		for (const { entry, translatedEntryLines, failed, attempted } of batchResults) {
+		for (const { entry, translatedEntryLines, failed, attempted, serviceError } of batchResults) {
 			if (attempted) {
 				attemptedEntries++;
 			}
 			if (failed) {
 				failedEntries++;
+			}
+			if (serviceError) {
+				serviceErrors++;
 			}
 			entry.indexes.forEach((lineIndex, idx) => {
 				translatedLines[lineIndex] = translatedEntryLines[idx];
@@ -229,7 +244,7 @@ async function translateMessages(text: string, targetLanguage: string, env: Env)
 
 	const joined = translatedLines.join("\n");
 	const translatedText = newline === "\n" ? joined : joined.replace(/\n/g, newline);
-	return { translatedText, failedEntries, attemptedEntries };
+	return { translatedText, failedEntries, attemptedEntries, serviceErrors };
 }
 
 async function translateText(text: string, targetLanguage: string, env: Env): Promise<string> {
@@ -259,6 +274,11 @@ interface EntryTranslationResult {
 	// False when the entry was never sent to the model (comment, blank, unparseable,
 	// or carrying text that would collide with our internal markers).
 	attempted: boolean;
+	// True only when the AI call itself threw. An entry whose translation came back
+	// unusable (segments miscounted, markers lost) is a failed entry but not evidence
+	// that the service is down, so it must not be able to turn the whole request into
+	// a 500 -- the caller still gets their file, with the failure counted in the header.
+	serviceError: boolean;
 }
 
 async function translateEntry(lines: string[], targetLanguage: string, env: Env): Promise<EntryTranslationResult> {
@@ -266,13 +286,13 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 	const trimmedFirstLine = firstLine.trim();
 
 	if (!trimmedFirstLine || trimmedFirstLine.startsWith("#") || trimmedFirstLine.startsWith("!")) {
-		return { translatedLines: lines, failed: false, attempted: false };
+		return { translatedLines: lines, failed: false, attempted: false, serviceError: false };
 	}
 
 	const segments: Segment[] = [];
 	const firstSegment = parseFirstLine(firstLine);
 	if (!firstSegment) {
-		return { translatedLines: lines, failed: false, attempted: false };
+		return { translatedLines: lines, failed: false, attempted: false, serviceError: false };
 	}
 	segments.push(firstSegment);
 
@@ -284,16 +304,16 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 	const unescapedValues = segments.map(segment => unescapePropertiesText(segment.value));
 
 	if (unescapedValues.every(value => value === "")) {
-		return { translatedLines: lines, failed: false, attempted: false };
+		return { translatedLines: lines, failed: false, attempted: false, serviceError: false };
 	}
 
 	// Source text containing either internal marker would survive the round trip and
 	// then be mangled on the way back out: SEGMENT_DELIMITER would split the entry
-	// into the wrong number of segments, and a literal __PH_n__ would be rewritten by
+	// into the wrong number of segments, and a literal XQZ<n> would be rewritten by
 	// restorePlaceholders into whatever placeholder happened to take that index.
 	// Leaving such entries untranslated is the safe outcome.
 	if (unescapedValues.some(value => value.includes(SEGMENT_DELIMITER) || value.includes(PLACEHOLDER_MARKER_PREFIX))) {
-		return { translatedLines: lines, failed: false, attempted: false };
+		return { translatedLines: lines, failed: false, attempted: false, serviceError: false };
 	}
 
 	const placeholderCounter = { current: 0 };
@@ -308,7 +328,21 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 		const translatedSegments = translatedCombined.split(SEGMENT_DELIMITER);
 
 		if (translatedSegments.length !== segments.length) {
-			return { translatedLines: lines, failed: true, attempted: true };
+			return { translatedLines: lines, failed: true, attempted: true, serviceError: false };
+		}
+
+		// Checked before anything is written, and per segment: a marker the model
+		// relocated across a segment boundary is just as unrestorable as one it
+		// mangled, since each segment is restored with only its own tokens.
+		const lostMarkers = segments.some(
+			(_, idx) => !markersSurvived(translatedSegments[idx], maskedSegments[idx].tokens)
+		);
+		if (lostMarkers) {
+			logError("placeholder_markers_lost", {
+				entryKey: firstLine.split(/[=:\s]/)[0]?.trim() || "unknown",
+				targetLanguage
+			});
+			return { translatedLines: lines, failed: true, attempted: true, serviceError: false };
 		}
 
 		const translatedLines = segments.map((segment, idx) => {
@@ -322,13 +356,13 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 			const escapedValue = escapePropertiesText(restoredPlaceholders);
 			return `${segment.prefix}${escapedValue}${segment.suffix}`;
 		});
-		return { translatedLines, failed: false, attempted: true };
+		return { translatedLines, failed: false, attempted: true, serviceError: false };
 	} catch (error) {
 		logError("entry_translation_failed", {
 			entryKey: firstLine.split(/[=:\s]/)[0]?.trim() || "unknown",
 			error: error instanceof Error ? error.message : String(error)
 		});
-		return { translatedLines: lines, failed: true, attempted: true };
+		return { translatedLines: lines, failed: true, attempted: true, serviceError: true };
 	}
 }
 
@@ -639,7 +673,7 @@ function escapePropertiesText(value: string): string {
 function maskPlaceholders(value: string, counter: { current: number }): { text: string; tokens: PlaceholderToken[] } {
 	const tokens: PlaceholderToken[] = [];
 	const mask = (match: string) => {
-		const marker = `${PLACEHOLDER_MARKER_PREFIX}${counter.current++}__`;
+		const marker = `${PLACEHOLDER_MARKER_PREFIX}${counter.current++}`;
 		tokens.push({ marker, original: match });
 		return marker;
 	};
@@ -652,13 +686,24 @@ function maskPlaceholders(value: string, counter: { current: number }): { text: 
 }
 
 function restorePlaceholders(text: string, tokens: PlaceholderToken[]): string {
-	let restored = text;
+	// Longest marker first: the markers carry no terminator, so restoring XQZ1
+	// before XQZ10 would consume that marker's prefix and strand a loose "0".
+	const ordered = [...tokens].sort((a, b) => b.marker.length - a.marker.length);
 
-	for (const token of tokens) {
+	let restored = text;
+	for (const token of ordered) {
 		restored = restored.split(token.marker).join(token.original);
 	}
 
 	return restored;
+}
+
+// Restoration matches markers exactly, so a marker the model dropped or mangled can
+// never be matched and its placeholder would vanish from the output without trace.
+// Checking first turns that silent corruption into an ordinary entry failure, which
+// falls back to the untranslated original and is reported via X-Translation-Failures.
+function markersSurvived(text: string, tokens: PlaceholderToken[]): boolean {
+	return tokens.every(token => text.includes(token.marker));
 }
 
 // Export parsing functions for testing
