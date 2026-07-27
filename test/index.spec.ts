@@ -299,6 +299,42 @@ describe('TranslateMessages Worker', () => {
 		expect(body).toBe("placeholder=Salut {0}\\! %s ${name}\n");
 	});
 
+	it('preserves \\n and \\t escapes when the model normalizes whitespace', async () => {
+		// The real m2m100 model collapses raw control characters to spaces, so any
+		// control character sent to it verbatim comes back destroyed. Simulate that.
+		const mockRun = vi.fn().mockImplementation((_model, args) =>
+			Promise.resolve({ translated_text: args.text.replace(/[\n\t\r\f]/g, ' ') })
+		);
+
+		const mockEnv = {
+			...env,
+			AI: { run: mockRun }
+		};
+
+		const fileContent = "message.escapes=First line\\nSecond line\\tTabbed value\n";
+		const formData = new FormData();
+		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
+		formData.append('file', file);
+		formData.append('language', 'es');
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: formData
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body).toContain('\\n');
+		expect(body).toContain('\\t');
+
+		// No raw control character may reach the model; only the masked marker form.
+		const translated = mockRun.mock.calls.map(([, args]) => args.text);
+		expect(translated.some((text) => /[\n\t\r\f]/.test(text))).toBe(false);
+	});
+
 	it('handles empty files gracefully', async () => {
 		const mockRun = vi.fn()
 			.mockResolvedValueOnce({ translated_text: 'ok' });

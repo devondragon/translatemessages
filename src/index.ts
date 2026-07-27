@@ -30,6 +30,11 @@ const SEGMENT_DELIMITER = "\u241E";
 // Pattern to match placeholders in property values
 const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]*\$?[-+#0-9.]*[a-zA-Z]/g;
 
+// Control characters are masked alongside placeholders because the translation
+// model normalizes whitespace: a raw \n or \t sent to it comes back as a space,
+// silently destroying the escape sequence in the output file.
+const CONTROL_CHAR_REGEX = /[\n\r\t\f]/g;
+
 // Structured logging helper for better observability
 function logError(event: string, details: Record<string, unknown>): void {
 	console.error(JSON.stringify({
@@ -533,11 +538,15 @@ function escapePropertiesText(value: string): string {
 
 function maskPlaceholders(value: string, counter: { current: number }): { text: string; tokens: PlaceholderToken[] } {
 	const tokens: PlaceholderToken[] = [];
-	const text = value.replace(PLACEHOLDER_REGEX, (match) => {
+	const mask = (match: string) => {
 		const marker = `__PH_${counter.current++}__`;
 		tokens.push({ marker, original: match });
 		return marker;
-	});
+	};
+
+	const text = value
+		.replace(PLACEHOLDER_REGEX, mask)
+		.replace(CONTROL_CHAR_REGEX, mask);
 
 	return { text, tokens };
 }
