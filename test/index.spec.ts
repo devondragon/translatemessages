@@ -586,6 +586,96 @@ describe('TranslateMessages Worker', () => {
 		expect(response.headers.get('X-Translation-Failures')).toBe('1');
 	});
 
+	it('recovers markers the model spaced out or changed the case of', async () => {
+		// Cheap recovery: no extra call, just canonicalise before matching.
+		const mockRun = vi.fn().mockImplementation((_model, args) =>
+			Promise.resolve({ translated_text: args.text.replace('XQZ0', 'xqz 0') })
+		);
+		const mockEnv = { ...env, AI: { run: mockRun } };
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm("greeting=Hello {0} there\n", 'fr')
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe("greeting=Hello {0} there\n");
+		expect(response.headers.get('X-Translation-Failures')).toBeNull();
+		expect(mockRun).toHaveBeenCalledTimes(1);
+	});
+
+	it('retries a lost marker with a perturbed input rather than the same one', async () => {
+		// m2m100 drops the marker from a two-token input like "Hi XQZ0" but keeps it
+		// once the input ends in a period. The model is deterministic, so resending the
+		// identical text would fail identically -- the perturbation is the whole point.
+		const mockRun = vi.fn().mockImplementation((_model, args) =>
+			args.text.endsWith('.')
+				? Promise.resolve({ translated_text: 'Salut XQZ0.' })
+				: Promise.resolve({ translated_text: 'Salut' })
+		);
+		const mockEnv = { ...env, AI: { run: mockRun } };
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm("named=Hi {0}\n", 'fr')
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		// The placeholder is back and the period we appended is not.
+		expect(await response.text()).toBe("named=Salut {0}\n");
+		expect(response.headers.get('X-Translation-Failures')).toBeNull();
+		expect(mockRun).toHaveBeenCalledTimes(2);
+		expect(mockRun.mock.calls[0][1].text).toBe('Hi XQZ0');
+		expect(mockRun.mock.calls[1][1].text).toBe('Hi XQZ0.');
+	});
+
+	it('does not retry a value that already ends in punctuation', async () => {
+		// The perturbation has nothing to add, so a second call could only burn quota.
+		const mockRun = vi.fn().mockResolvedValue({ translated_text: 'Salut' });
+		const mockEnv = { ...env, AI: { run: mockRun } };
+
+		const fileContent = "named=Hi {0}.\n";
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm(fileContent, 'fr')
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe(fileContent);
+		expect(response.headers.get('X-Translation-Failures')).toBe('1');
+		expect(mockRun).toHaveBeenCalledTimes(1);
+	});
+
+	it('keeps punctuation the model chose when the retry succeeds', async () => {
+		// We appended a period; an exclamation mark is the model's own and must survive.
+		const mockRun = vi.fn().mockImplementation((_model, args) =>
+			args.text.endsWith('.')
+				? Promise.resolve({ translated_text: 'Salut XQZ0!' })
+				: Promise.resolve({ translated_text: 'Salut' })
+		);
+		const mockEnv = { ...env, AI: { run: mockRun } };
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm("named=Hi {0}\n", 'fr')
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe("named=Salut {0}\\!\n");
+	});
+
 	it('restores double-digit placeholders without clobbering single-digit ones', async () => {
 		// Markers carry no terminator, so XQZ1 is a prefix of XQZ10 and restoring in
 		// token order would consume it and strand a loose "0".

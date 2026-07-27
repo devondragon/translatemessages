@@ -16,6 +16,11 @@ export interface PlaceholderToken {
 	original: string;
 }
 
+export interface MaskedSegment {
+	text: string;
+	tokens: PlaceholderToken[];
+}
+
 // Supported language codes for m2m100 model
 const SUPPORTED_LANGUAGES = [
 	"af", "am", "ar", "ast", "az", "ba", "be", "bg", "bn", "br", "bs", "ca", "ceb", "cs", "cy", "da", 
@@ -42,6 +47,19 @@ const SEGMENT_DELIMITER = "__SEG__";
 // XQZ<n> round-tripped intact in fr/es/de/ja/zh, next to punctuation, inside
 // parentheses, and across double-digit indexes.
 const PLACEHOLDER_MARKER_PREFIX = "XQZ";
+
+// m2m100 degenerates on very short inputs: "Hi XQZ0" comes back with the marker
+// dropped entirely, while "Hi XQZ0." translates correctly and keeps it. Measured
+// against the deployed Worker, a trailing period rescued every short-input failure
+// in fr and pt, and "Hi {0}" failed identically to "Hi ${name}" -- so this is an
+// input-length pathology, not anything to do with placeholder syntax.
+const RETRY_TERMINATOR = ".";
+
+// Only period-like characters are stripped back off, because a period is what we
+// appended; an exclamation or question mark in the output was the model's own choice.
+const RETRY_TERMINATOR_REGEX = /[.。．]\s*$/;
+
+const ENDS_WITH_TERMINATOR = /[.!?。．！？…]\s*$/;
 
 // Pattern to match placeholders in property values
 const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]*\$?[-+#0-9.]*[a-zA-Z]/g;
@@ -268,6 +286,33 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 	}
 }
 
+// One translation attempt: returns the per-segment text with every marker present
+// and canonical, or null if the result is unusable and the caller should give up or
+// retry. Never returns a partially usable result -- a caller that wrote one out
+// would be shipping a file with placeholders silently missing.
+async function translateSegments(
+	combinedValue: string,
+	maskedSegments: MaskedSegment[],
+	targetLanguage: string,
+	env: Env
+): Promise<string[] | null> {
+	const translatedCombined = await translateText(combinedValue, targetLanguage, env);
+	const translatedSegments = translatedCombined.split(SEGMENT_DELIMITER).map(normalizeMarkers);
+
+	if (translatedSegments.length !== maskedSegments.length) {
+		return null;
+	}
+
+	// Checked per segment: a marker the model relocated across a segment boundary is
+	// just as unrestorable as one it mangled, since each segment is restored with
+	// only its own tokens.
+	const lostMarkers = maskedSegments.some(
+		(masked, idx) => !markersSurvived(translatedSegments[idx], masked.tokens)
+	);
+
+	return lostMarkers ? null : translatedSegments;
+}
+
 interface EntryTranslationResult {
 	translatedLines: string[];
 	failed: boolean;
@@ -324,27 +369,29 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 	const combinedValue = maskedSegments.map(segment => segment.text).join(`${SEGMENT_DELIMITER} `);
 
 	try {
-		const translatedCombined = await translateText(combinedValue, targetLanguage, env);
-		const translatedSegments = translatedCombined.split(SEGMENT_DELIMITER);
+		let translatedSegments = await translateSegments(combinedValue, maskedSegments, targetLanguage, env);
 
-		if (translatedSegments.length !== segments.length) {
-			return { translatedLines: lines, failed: true, attempted: true, serviceError: false };
+		// The model is deterministic -- the same input loses the same marker every
+		// time -- so a plain retry is guaranteed to waste a call. Perturbing the input
+		// is what actually changes the outcome, and only for an entry that would
+		// otherwise ship untranslated.
+		let addedRetryTerminator = false;
+		if (!translatedSegments && !ENDS_WITH_TERMINATOR.test(combinedValue)) {
+			translatedSegments = await translateSegments(
+				`${combinedValue}${RETRY_TERMINATOR}`, maskedSegments, targetLanguage, env
+			);
+			addedRetryTerminator = translatedSegments !== null;
 		}
 
-		// Checked before anything is written, and per segment: a marker the model
-		// relocated across a segment boundary is just as unrestorable as one it
-		// mangled, since each segment is restored with only its own tokens.
-		const lostMarkers = segments.some(
-			(_, idx) => !markersSurvived(translatedSegments[idx], maskedSegments[idx].tokens)
-		);
-		if (lostMarkers) {
-			logError("placeholder_markers_lost", {
+		if (!translatedSegments) {
+			logError("entry_translation_unusable", {
 				entryKey: firstLine.split(/[=:\s]/)[0]?.trim() || "unknown",
 				targetLanguage
 			});
 			return { translatedLines: lines, failed: true, attempted: true, serviceError: false };
 		}
 
+		const lastIndex = segments.length - 1;
 		const translatedLines = segments.map((segment, idx) => {
 			// Drop the padding space introduced by the join. Continuation values never
 			// begin with whitespace (parseContinuationLine moves it into the prefix),
@@ -352,7 +399,12 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 			const translatedSegment = idx === 0
 				? translatedSegments[idx]
 				: translatedSegments[idx].replace(/^[ \t]+/, "");
-			const restoredPlaceholders = restorePlaceholders(translatedSegment, maskedSegments[idx].tokens);
+			// Remove only a terminator we introduced ourselves, and only from the tail
+			// segment where it was appended. Punctuation the model chose is left alone.
+			const withoutRetryTerminator = addedRetryTerminator && idx === lastIndex
+				? translatedSegment.replace(RETRY_TERMINATOR_REGEX, "")
+				: translatedSegment;
+			const restoredPlaceholders = restorePlaceholders(withoutRetryTerminator, maskedSegments[idx].tokens);
 			const escapedValue = escapePropertiesText(restoredPlaceholders);
 			return `${segment.prefix}${escapedValue}${segment.suffix}`;
 		});
@@ -670,7 +722,7 @@ function escapePropertiesText(value: string): string {
 	return result.join("");
 }
 
-function maskPlaceholders(value: string, counter: { current: number }): { text: string; tokens: PlaceholderToken[] } {
+function maskPlaceholders(value: string, counter: { current: number }): MaskedSegment {
 	const tokens: PlaceholderToken[] = [];
 	const mask = (match: string) => {
 		const marker = `${PLACEHOLDER_MARKER_PREFIX}${counter.current++}`;
@@ -696,6 +748,17 @@ function restorePlaceholders(text: string, tokens: PlaceholderToken[]): string {
 	}
 
 	return restored;
+}
+
+// The model sometimes returns a marker with whitespace inserted or its case altered
+// ("XQZ 0", "xqz0"). Canonicalising those before matching recovers the placeholder
+// without spending another call. Safe because the collision guard rejects any source
+// text containing the prefix, so every marker-shaped run in a translation started
+// life as one of ours.
+const MARKER_VARIANT_REGEX = new RegExp(`${PLACEHOLDER_MARKER_PREFIX}\\s*(\\d+)`, "gi");
+
+function normalizeMarkers(text: string): string {
+	return text.replace(MARKER_VARIANT_REGEX, (_match, index: string) => `${PLACEHOLDER_MARKER_PREFIX}${index}`);
 }
 
 // Restoration matches markers exactly, so a marker the model dropped or mangled can
