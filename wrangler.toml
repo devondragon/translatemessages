@@ -7,6 +7,20 @@ compatibility_flags = ["nodejs_compat"]
 [observability]
 enabled = true
 
+# Browser origins allowed to read responses from this Worker, comma-separated.
+# Any http://localhost:<port> origin is always allowed so local.html and
+# `npm run dev` work without configuration. CORS is enforced by browsers only,
+# so this has no effect on cli/translate_messages.rb or curl.
+[vars]
+ALLOWED_ORIGINS = "https://translatemessages.pages.dev"
+
+# The production custom domain (translatemessages.justblackmagic.com) is currently
+# configured in the Cloudflare dashboard rather than here, so it cannot be
+# reproduced from this repo alone. To make it declarative, uncomment:
+# [[routes]]
+# pattern = "translatemessages.justblackmagic.com"
+# custom_domain = true
+
 # Automatically place your workloads in an optimal location to minimize latency.
 # If you are running back-end logic in a Worker, running it closer to your back-end infrastructure
 # rather than the end user may result in better performance.
@@ -117,6 +131,10 @@ name = "translatemessages-staging"
 
 [env.staging.ai]
 binding = "AI"
+
+# Named environments do not inherit top-level [vars], so this must be repeated.
+[env.staging.vars]
+ALLOWED_ORIGINS = "https://translatemessages.pages.dev"
 
 [env.staging.observability]
 enabled = true

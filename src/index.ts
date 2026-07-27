@@ -1,5 +1,8 @@
 export interface Env {
 	AI: Pick<Ai, 'run'>;
+	// Comma-separated list of browser origins allowed to read responses.
+	// Set in wrangler.toml under [vars]; falls back to DEFAULT_ALLOWED_ORIGINS.
+	ALLOWED_ORIGINS?: string;
 }
 
 export interface Segment {
@@ -30,6 +33,10 @@ const SUPPORTED_LANGUAGES = [
 // correctly translated multi-line entries to be discarded as failures.
 const SEGMENT_DELIMITER = "__SEG__";
 
+// Prefix for the markers that stand in for placeholders during translation.
+// Shares the plain-ASCII requirement described above for SEGMENT_DELIMITER.
+const PLACEHOLDER_MARKER_PREFIX = "__PH_";
+
 // Pattern to match placeholders in property values
 const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]*\$?[-+#0-9.]*[a-zA-Z]/g;
 
@@ -38,6 +45,43 @@ const PLACEHOLDER_REGEX = /\{[0-9a-zA-Z_,.#:\s]+\}|\$\{[0-9a-zA-Z_.:-]+\}|%[0-9]
 // silently destroying the escape sequence in the output file. The full C0 range
 // and DEL are covered because \uXXXX escapes can decode to any of them.
 const CONTROL_CHAR_REGEX = /[\x00-\x1f\x7f]/g;
+
+// CORS is enforced by browsers only. Command-line clients (cli/translate_messages.rb,
+// curl) send no Origin header and ignore these headers entirely, so tightening the
+// allowlist here can never break them.
+const DEFAULT_ALLOWED_ORIGINS = ["https://translatemessages.pages.dev"];
+
+// Any localhost port is allowed so local.html and `npm run dev` work without config.
+const LOCAL_ORIGIN_REGEX = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/;
+
+// Non-safelisted response headers are invisible to cross-origin JavaScript unless
+// named here: Content-Disposition carries the download filename and
+// X-Translation-Failures the partial-failure count the frontend warns on.
+const EXPOSED_HEADERS = "Content-Disposition, X-Translation-Failures";
+
+function isOriginAllowed(origin: string, env: Env): boolean {
+	if (LOCAL_ORIGIN_REGEX.test(origin)) {
+		return true;
+	}
+	const configured = env.ALLOWED_ORIGINS
+		? env.ALLOWED_ORIGINS.split(",").map(entry => entry.trim()).filter(Boolean)
+		: DEFAULT_ALLOWED_ORIGINS;
+	return configured.includes(origin);
+}
+
+function corsHeaders(request: Request, env: Env): Record<string, string> {
+	// Vary is set even when the origin is rejected, so a cache never replays one
+	// origin's response — allow header included or not — to a different origin.
+	const headers: Record<string, string> = { "Vary": "Origin" };
+
+	const origin = request.headers.get("Origin");
+	if (origin && isOriginAllowed(origin, env)) {
+		headers["Access-Control-Allow-Origin"] = origin;
+		headers["Access-Control-Expose-Headers"] = EXPOSED_HEADERS;
+	}
+
+	return headers;
+}
 
 // Structured logging helper for better observability
 function logError(event: string, details: Record<string, unknown>): void {
@@ -51,74 +95,102 @@ function logError(event: string, details: Record<string, unknown>): void {
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		if (request.method !== "POST") {
-			return new Response("Invalid request method. Use POST.", { status: 405 });
+		const cors = corsHeaders(request, env);
+
+		// The frontend's multipart/form-data POST sets no custom headers, so it is a
+		// CORS "simple request" and is never preflighted. OPTIONS is answered anyway
+		// so clients that do send custom headers are not locked out.
+		if (request.method === "OPTIONS") {
+			return new Response(null, {
+				status: 204,
+				headers: {
+					...cors,
+					"Access-Control-Allow-Methods": "POST, OPTIONS",
+					"Access-Control-Allow-Headers": "Content-Type",
+					"Access-Control-Max-Age": "86400"
+				}
+			});
 		}
 
-		let formData: FormData;
-		try {
-			formData = await request.formData();
-		} catch {
-			return new Response("Invalid request body. Expected multipart form data.", { status: 400 });
+		// Applied to every response, including errors: without the allow header the
+		// browser discards the body, so the frontend could not even show the reason.
+		const response = await handleTranslation(request, env);
+		for (const [name, value] of Object.entries(cors)) {
+			response.headers.set(name, value);
 		}
-
-		const fileEntry = formData.get("file");
-		const languageEntry = formData.get("language");
-
-		if (!(fileEntry instanceof File)) {
-			return new Response("File parameter must be a file upload.", { status: 400 });
-		}
-		if (typeof languageEntry !== "string") {
-			return new Response("Language parameter must be a string.", { status: 400 });
-		}
-
-		const file = fileEntry;
-		const language = languageEntry;
-
-
-		// Check file size (5MB limit)
-		const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
-		if (file.size > MAX_FILE_SIZE) {
-			return new Response("File too large. Maximum size is 5MB.", { status: 413 });
-		}
-
-		// Normalize and validate language code
-		const normalizedLanguage = language.toLowerCase();
-		const languageCode = normalizedLanguage.split("-")[0]; // Handle cases like "pt-BR"
-		if (!SUPPORTED_LANGUAGES.includes(languageCode)) {
-			return new Response(`Unsupported language code: ${language}. Supported languages: ${SUPPORTED_LANGUAGES.join(", ")}`, { status: 400 });
-		}
-
-		const text = await file.text();
-
-		// Perform a test translation before processing all messages
-		try {
-			const testText = "test"; // Simple test string
-			await translateText(testText, languageCode, env);
-		} catch (error) {
-			return new Response(`Translation service error: ${error instanceof Error ? error.message : 'Unknown error'}`, { status: 500 });
-		}
-
-		const { translatedText, failedEntries } = await translateMessages(text, languageCode, env);
-
-		const filename = `messages_${languageCode}.properties`;
-
-		const headers: Record<string, string> = {
-			"Content-Disposition": `attachment; filename="${filename}"`,
-			"Content-Type": "text/plain; charset=utf-8"
-		};
-
-		if (failedEntries > 0) {
-			headers["X-Translation-Failures"] = String(failedEntries);
-		}
-
-		return new Response(translatedText, { headers });
+		return response;
 	},
 };
+
+async function handleTranslation(request: Request, env: Env): Promise<Response> {
+	if (request.method !== "POST") {
+		return new Response("Invalid request method. Use POST.", { status: 405 });
+	}
+
+	let formData: FormData;
+	try {
+		formData = await request.formData();
+	} catch {
+		return new Response("Invalid request body. Expected multipart form data.", { status: 400 });
+	}
+
+	const fileEntry = formData.get("file");
+	const languageEntry = formData.get("language");
+
+	if (!(fileEntry instanceof File)) {
+		return new Response("File parameter must be a file upload.", { status: 400 });
+	}
+	if (typeof languageEntry !== "string") {
+		return new Response("Language parameter must be a string.", { status: 400 });
+	}
+
+	const file = fileEntry;
+	const language = languageEntry;
+
+
+	// Check file size (5MB limit)
+	const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+	if (file.size > MAX_FILE_SIZE) {
+		return new Response("File too large. Maximum size is 5MB.", { status: 413 });
+	}
+
+	// Normalize and validate language code
+	const normalizedLanguage = language.toLowerCase();
+	const languageCode = normalizedLanguage.split("-")[0]; // Handle cases like "pt-BR"
+	if (!SUPPORTED_LANGUAGES.includes(languageCode)) {
+		return new Response(`Unsupported language code: ${language}. Supported languages: ${SUPPORTED_LANGUAGES.join(", ")}`, { status: 400 });
+	}
+
+	const text = await file.text();
+
+	const { translatedText, failedEntries, attemptedEntries } = await translateMessages(text, languageCode, env);
+
+	// Every translatable entry failing means the model or binding is down, not that
+	// a few awkward strings tripped it up, so fail loudly rather than hand back a
+	// file that looks translated but is not. This replaces an eager probe
+	// translation that doubled the AI calls on every single request.
+	if (attemptedEntries > 0 && failedEntries === attemptedEntries) {
+		return new Response("Translation service error: no entries could be translated.", { status: 500 });
+	}
+
+	const filename = `messages_${languageCode}.properties`;
+
+	const headers: Record<string, string> = {
+		"Content-Disposition": `attachment; filename="${filename}"`,
+		"Content-Type": "text/plain; charset=utf-8"
+	};
+
+	if (failedEntries > 0) {
+		headers["X-Translation-Failures"] = String(failedEntries);
+	}
+
+	return new Response(translatedText, { headers });
+}
 
 interface TranslationResult {
 	translatedText: string;
 	failedEntries: number;
+	attemptedEntries: number;
 }
 
 async function translateMessages(text: string, targetLanguage: string, env: Env): Promise<TranslationResult> {
@@ -129,16 +201,23 @@ async function translateMessages(text: string, targetLanguage: string, env: Env)
 	const entries = buildEntries(lines);
 	const BATCH_SIZE = 100; // Process up to 100 translations concurrently
 	let failedEntries = 0;
+	// Entries actually sent to the model. Comments, blank lines and unparseable
+	// lines are skipped rather than attempted, so counting them would make a
+	// comment-heavy file look like a total translation failure.
+	let attemptedEntries = 0;
 
 	for (let i = 0; i < entries.length; i += BATCH_SIZE) {
 		const batch = entries.slice(i, i + BATCH_SIZE);
 		const translationPromises = batch.map(async (entry) => {
 			const entryLines = entry.indexes.map((idx) => lines[idx]);
-			const { translatedLines: translatedEntryLines, failed } = await translateEntry(entryLines, targetLanguage, env);
-			return { entry, translatedEntryLines, failed };
+			const { translatedLines: translatedEntryLines, failed, attempted } = await translateEntry(entryLines, targetLanguage, env);
+			return { entry, translatedEntryLines, failed, attempted };
 		});
 		const batchResults = await Promise.all(translationPromises);
-		for (const { entry, translatedEntryLines, failed } of batchResults) {
+		for (const { entry, translatedEntryLines, failed, attempted } of batchResults) {
+			if (attempted) {
+				attemptedEntries++;
+			}
 			if (failed) {
 				failedEntries++;
 			}
@@ -150,7 +229,7 @@ async function translateMessages(text: string, targetLanguage: string, env: Env)
 
 	const joined = translatedLines.join("\n");
 	const translatedText = newline === "\n" ? joined : joined.replace(/\n/g, newline);
-	return { translatedText, failedEntries };
+	return { translatedText, failedEntries, attemptedEntries };
 }
 
 async function translateText(text: string, targetLanguage: string, env: Env): Promise<string> {
@@ -177,6 +256,9 @@ async function translateText(text: string, targetLanguage: string, env: Env): Pr
 interface EntryTranslationResult {
 	translatedLines: string[];
 	failed: boolean;
+	// False when the entry was never sent to the model (comment, blank, unparseable,
+	// or carrying text that would collide with our internal markers).
+	attempted: boolean;
 }
 
 async function translateEntry(lines: string[], targetLanguage: string, env: Env): Promise<EntryTranslationResult> {
@@ -184,13 +266,13 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 	const trimmedFirstLine = firstLine.trim();
 
 	if (!trimmedFirstLine || trimmedFirstLine.startsWith("#") || trimmedFirstLine.startsWith("!")) {
-		return { translatedLines: lines, failed: false };
+		return { translatedLines: lines, failed: false, attempted: false };
 	}
 
 	const segments: Segment[] = [];
 	const firstSegment = parseFirstLine(firstLine);
 	if (!firstSegment) {
-		return { translatedLines: lines, failed: false };
+		return { translatedLines: lines, failed: false, attempted: false };
 	}
 	segments.push(firstSegment);
 
@@ -202,11 +284,16 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 	const unescapedValues = segments.map(segment => unescapePropertiesText(segment.value));
 
 	if (unescapedValues.every(value => value === "")) {
-		return { translatedLines: lines, failed: false };
+		return { translatedLines: lines, failed: false, attempted: false };
 	}
 
-	if (unescapedValues.some(value => value.includes(SEGMENT_DELIMITER))) {
-		return { translatedLines: lines, failed: false };
+	// Source text containing either internal marker would survive the round trip and
+	// then be mangled on the way back out: SEGMENT_DELIMITER would split the entry
+	// into the wrong number of segments, and a literal __PH_n__ would be rewritten by
+	// restorePlaceholders into whatever placeholder happened to take that index.
+	// Leaving such entries untranslated is the safe outcome.
+	if (unescapedValues.some(value => value.includes(SEGMENT_DELIMITER) || value.includes(PLACEHOLDER_MARKER_PREFIX))) {
+		return { translatedLines: lines, failed: false, attempted: false };
 	}
 
 	const placeholderCounter = { current: 0 };
@@ -221,7 +308,7 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 		const translatedSegments = translatedCombined.split(SEGMENT_DELIMITER);
 
 		if (translatedSegments.length !== segments.length) {
-			return { translatedLines: lines, failed: true };
+			return { translatedLines: lines, failed: true, attempted: true };
 		}
 
 		const translatedLines = segments.map((segment, idx) => {
@@ -235,13 +322,13 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env)
 			const escapedValue = escapePropertiesText(restoredPlaceholders);
 			return `${segment.prefix}${escapedValue}${segment.suffix}`;
 		});
-		return { translatedLines, failed: false };
+		return { translatedLines, failed: false, attempted: true };
 	} catch (error) {
 		logError("entry_translation_failed", {
 			entryKey: firstLine.split(/[=:\s]/)[0]?.trim() || "unknown",
 			error: error instanceof Error ? error.message : String(error)
 		});
-		return { translatedLines: lines, failed: true };
+		return { translatedLines: lines, failed: true, attempted: true };
 	}
 }
 
@@ -552,7 +639,7 @@ function escapePropertiesText(value: string): string {
 function maskPlaceholders(value: string, counter: { current: number }): { text: string; tokens: PlaceholderToken[] } {
 	const tokens: PlaceholderToken[] = [];
 	const mask = (match: string) => {
-		const marker = `__PH_${counter.current++}__`;
+		const marker = `${PLACEHOLDER_MARKER_PREFIX}${counter.current++}__`;
 		tokens.push({ marker, original: match });
 		return marker;
 	};

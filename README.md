@@ -125,6 +125,24 @@ Before deploying the `pages` directory as a Cloudflare Pages application, you ne
 3. **Save the Changes**:
    - After updating the form action, save the `index.html` file.
 
+### Allowing Your Pages Origin (CORS)
+
+The form submits via `fetch()`, so the Worker and the Pages site are two different
+origins and the browser will discard the Worker's response unless the Worker names
+your Pages origin explicitly. Set `ALLOWED_ORIGINS` in `wrangler.toml` to the origin
+your form is served from, then redeploy the Worker:
+
+```toml
+[vars]
+ALLOWED_ORIGINS = "https://your-project.pages.dev"
+```
+
+Multiple origins are comma-separated. Any `http://localhost:<port>` origin is always
+allowed, so `local.html` and `npm run dev` need no configuration.
+
+This affects browsers only — the Ruby CLI and `curl` send no `Origin` header and are
+unaffected by this setting.
+
 ### Deploying to Cloudflare Pages
 
 Once you have edited the `index.html` file, you can deploy the `pages` directory as a Cloudflare Pages application.
