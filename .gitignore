@@ -175,3 +175,6 @@ dist
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Playwright MCP screenshot artifacts
+.playwright-mcp/
