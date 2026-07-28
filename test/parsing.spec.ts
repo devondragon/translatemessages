@@ -405,3 +405,32 @@ describe('SUPPORTED_LANGUAGES', () => {
 		expect(uniqueLanguages.size).toBe(SUPPORTED_LANGUAGES.length);
 	});
 });
+
+// #{...} is JSF/Spring EL, not a comment. Treating it as one silently dropped
+// everything from the expression onward -- see splitInlineComment in src/index.ts.
+describe('EL expressions are not inline comments', () => {
+	it('keeps a leading EL expression in the value', () => {
+		const result = parseFirstLine('isYourEmailAddress = #{mailQueue.email} is your address.');
+		expect(result?.value).toBe('#{mailQueue.email} is your address.');
+		expect(result?.suffix).toBe('');
+	});
+
+	it('keeps an EL expression in the middle of a value', () => {
+		const result = parseFirstLine('addressExpires = Expires in #{mailQueue.minutesLeft} minutes.');
+		// Previously truncated at the "#", leaving " minutes." untranslated in the suffix.
+		expect(result?.value).toBe('Expires in #{mailQueue.minutesLeft} minutes.');
+		expect(result?.suffix).toBe('');
+	});
+
+	it('still treats a real trailing comment as a comment', () => {
+		const result = parseFirstLine('commented=Hello  # note for translators');
+		expect(result?.value).toBe('Hello');
+		expect(result?.suffix).toBe('  # note for translators');
+	});
+
+	it('still treats a bare # value as a comment', () => {
+		const result = parseFirstLine('key=# just a note');
+		expect(result?.value).toBe('');
+		expect(result?.suffix).toBe('# just a note');
+	});
+});
