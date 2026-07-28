@@ -9,6 +9,9 @@ export interface Env {
 	// Comma-separated models a client may request by name. Unset means only
 	// DEFAULT_MODEL, which keeps a public endpoint off the expensive ones.
 	ALLOWED_MODELS?: string;
+	// Optional per-IP burst limiter. Absent means no limiting, which is what a private
+	// single-user deployment wants; the public deployments bind it in wrangler.toml.
+	RATE_LIMITER?: RateLimit;
 }
 
 export interface Segment {
@@ -178,6 +181,39 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
 	return headers;
 }
 
+// Must match simple.period in the [[ratelimits]] binding, which the runtime only
+// accepts as 10 or 60. It is reported to the caller as Retry-After.
+const RATE_LIMIT_PERIOD_SECONDS = 60;
+
+// CF-Connecting-IP is set by the edge and cannot be spoofed by the client. The
+// fallback only matters off Cloudflare -- in tests and `wrangler dev` -- where it
+// buckets everyone together, which is fine because no limiter is bound there either.
+function clientKey(request: Request): string {
+	return request.headers.get("CF-Connecting-IP") ?? "unknown";
+}
+
+// Burst protection only. The binding's window maxes out at 60 seconds, so this stops
+// a script hammering the endpoint; it does not cap daily spend, and the counters are
+// per Cloudflare location rather than global, so a client spread across locations
+// gets proportionally more. Capping a day's spend needs a durable counter, not this.
+async function isRateLimited(request: Request, env: Env): Promise<boolean> {
+	if (!env.RATE_LIMITER) {
+		return false;
+	}
+
+	try {
+		const { success } = await env.RATE_LIMITER.limit({ key: clientKey(request) });
+		return !success;
+	} catch (error) {
+		// A limiter that is failing is not a reason to refuse translations. Log it and
+		// let the request through rather than turning an internal fault into an outage.
+		logError("rate_limiter_error", {
+			error: error instanceof Error ? error.message : String(error)
+		});
+		return false;
+	}
+}
+
 // Structured logging helper for better observability
 function logError(event: string, details: Record<string, unknown>): void {
 	console.error(JSON.stringify({
@@ -205,6 +241,17 @@ export default {
 					"Access-Control-Max-Age": "86400"
 				}
 			});
+		}
+
+		// Checked after the preflight branch on purpose: rate-limiting an OPTIONS
+		// request would make the browser report a CORS failure rather than the 429 the
+		// user should see.
+		if (await isRateLimited(request, env)) {
+			logError("rate_limited", { ip: clientKey(request) });
+			return new Response(
+				"Too many requests. Please wait a minute and try again.",
+				{ status: 429, headers: { ...cors, "Retry-After": String(RATE_LIMIT_PERIOD_SECONDS) } }
+			);
 		}
 
 		// Applied to every response, including errors: without the allow header the

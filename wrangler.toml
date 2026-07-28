@@ -18,6 +18,18 @@ ALLOWED_ORIGINS = "https://translatemessages.pages.dev"
 # the default per token, so clients must not be able to pick the model.
 DEFAULT_MODEL = "llama-3.1-8b"
 
+# Per-IP burst protection for the public endpoint. Burst only: the binding's window
+# maxes out at 60 seconds and its counters are per Cloudflare location, so this stops
+# a script hammering the endpoint but does not cap a day's spend. 20/minute leaves
+# room for the CLI translating into a dozen languages back to back.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
 # The production custom domain (translatemessages.justblackmagic.com) is currently
 # configured in the Cloudflare dashboard rather than here, so it cannot be
 # reproduced from this repo alone. To make it declarative, uncomment:
@@ -136,12 +148,25 @@ name = "translatemessages-staging"
 [env.staging.ai]
 binding = "AI"
 
+[env.staging.observability]
+enabled = true
+
 # Named environments do not inherit top-level [vars], so these must be repeated.
 # Staging offers the whole registry because scripts/compare-models.mjs drives it.
 [env.staging.vars]
 ALLOWED_ORIGINS = "https://translatemessages.pages.dev"
 DEFAULT_MODEL = "llama-3.1-8b"
 ALLOWED_MODELS = "m2m100,llama-3.1-8b,llama-3.2-3b,llama-3.3-70b,llama-4-scout,gemma-3-12b,mistral-small-3.1"
+
+# A separate namespace from production, so the comparison harness hitting staging
+# hard cannot consume production's budget for the same IP.
+[[env.staging.ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1002"
+
+  [env.staging.ratelimits.simple]
+  limit = 60
+  period = 60
 
 # Personal instance. Defaults to llama-4-scout, which measured best on wording
 # quality and is roughly 3x faster than the default, at about 3.3x the token cost --
@@ -162,6 +187,5 @@ ALLOWED_MODELS = "m2m100,llama-3.1-8b,llama-3.2-3b,llama-3.3-70b,llama-4-scout,m
 # No browser origin is allowed: this instance is for the CLI, which sends no Origin
 # header and is unaffected by CORS. Add one here if you ever point a page at it.
 ALLOWED_ORIGINS = ""
-
-[env.staging.observability]
-enabled = true
+# Deliberately no [[ratelimits]] binding: one known user, and the code treats a
+# missing binding as "do not limit". Add one if this URL ever gets shared.

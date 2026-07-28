@@ -1146,3 +1146,109 @@ describe('batched translation', () => {
 		expect(mockRun.mock.calls[0][1].text).toBe('One');
 	});
 });
+
+// Burst protection for the public endpoint. The binding is optional: a deployment
+// without it does no limiting, which is what the single-user personal instance wants.
+describe('rate limiting', () => {
+	function limiterEnv(limit: ReturnType<typeof vi.fn>, aiRun?: ReturnType<typeof vi.fn>) {
+		return {
+			...env,
+			AI: { run: aiRun ?? vi.fn().mockResolvedValue({ response: '1. Bonjour' }) },
+			RATE_LIMITER: { limit }
+		} as unknown as Env;
+	}
+
+	function translateRequest(ip = '203.0.113.7') {
+		return new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm("greeting=Hello\n", 'fr'),
+			headers: { 'CF-Connecting-IP': ip, Origin: 'https://translatemessages.pages.dev' }
+		});
+	}
+
+	async function send(request: Request, mockEnv: Env) {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+		return response;
+	}
+
+	it('rejects with 429 once the limit is exceeded', async () => {
+		const limit = vi.fn().mockResolvedValue({ success: false });
+		const aiRun = vi.fn();
+
+		const response = await send(translateRequest(), limiterEnv(limit, aiRun));
+
+		expect(response.status).toBe(429);
+		expect(response.headers.get('Retry-After')).toBe('60');
+		// No AI call: the point is to not spend the budget on a refused request.
+		expect(aiRun).not.toHaveBeenCalled();
+	});
+
+	it('keeps CORS headers on the 429', async () => {
+		const limit = vi.fn().mockResolvedValue({ success: false });
+
+		const response = await send(translateRequest(), limiterEnv(limit));
+
+		// Asserted together: a 200 carries the same header, so checking the header
+		// alone would pass even if the limiter were bypassed entirely.
+		expect(response.status).toBe(429);
+		// Without these the browser discards the body and the frontend shows a generic
+		// network error instead of "you are being rate limited".
+		expect(response.headers.get('Access-Control-Allow-Origin'))
+			.toBe('https://translatemessages.pages.dev');
+		expect(await response.text()).toContain('Too many requests');
+	});
+
+	it('buckets by client IP', async () => {
+		const limit = vi.fn().mockResolvedValue({ success: true });
+
+		await send(translateRequest('198.51.100.4'), limiterEnv(limit));
+
+		expect(limit).toHaveBeenCalledWith({ key: '198.51.100.4' });
+	});
+
+	it('lets the request through when under the limit', async () => {
+		const limit = vi.fn().mockResolvedValue({ success: true });
+
+		const response = await send(translateRequest(), limiterEnv(limit));
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe("greeting=Bonjour\n");
+	});
+
+	it('does not limit preflight requests', async () => {
+		const limit = vi.fn().mockResolvedValue({ success: false });
+		const request = new IncomingRequest('http://example.com', {
+			method: 'OPTIONS',
+			headers: { Origin: 'https://translatemessages.pages.dev', 'CF-Connecting-IP': '203.0.113.7' }
+		});
+
+		const response = await send(request, limiterEnv(limit));
+
+		// Limiting the preflight would surface as a CORS failure rather than the 429
+		// the user should actually see.
+		expect(response.status).toBe(204);
+		expect(limit).not.toHaveBeenCalled();
+	});
+
+	it('fails open when the limiter itself errors', async () => {
+		const limit = vi.fn().mockRejectedValue(new Error('limiter unavailable'));
+
+		const response = await send(translateRequest(), limiterEnv(limit));
+
+		// A broken limiter is not a reason to refuse translations.
+		expect(response.status).toBe(200);
+	});
+
+	it('does no limiting when no limiter is bound', async () => {
+		const mockEnv = {
+			...env,
+			AI: { run: vi.fn().mockResolvedValue({ response: '1. Bonjour' }) }
+		} as unknown as Env;
+
+		const response = await send(translateRequest(), mockEnv);
+
+		expect(response.status).toBe(200);
+	});
+});

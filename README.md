@@ -143,6 +143,31 @@ allowed, so `local.html` and `npm run dev` need no configuration.
 This affects browsers only — the Ruby CLI and `curl` send no `Origin` header and are
 unaffected by this setting.
 
+### Rate Limiting
+
+The Worker binds Cloudflare's rate limiting API per client IP. Configure it in
+`wrangler.toml`:
+
+```toml
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60      # the runtime accepts only 10 or 60
+```
+
+Omit the binding entirely and no limiting happens, which is what a private
+single-user deployment wants. A limiter that errors fails open — a broken limiter is
+not a reason to refuse translations.
+
+**This is burst protection, not a spending cap.** The window maxes out at 60 seconds
+and the counters are per Cloudflare location rather than global, so a client spread
+across locations gets proportionally more than the configured limit. Capping a day's
+spend needs a durable counter (KV, D1 or a Durable Object) keyed by date, or
+account-level billing controls.
+
 ### Deploying to Cloudflare Pages
 
 Once you have edited the `index.html` file, you can deploy the `pages` directory as a Cloudflare Pages application.
