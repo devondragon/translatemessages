@@ -10,3 +10,15 @@ compatibility_flags = ["nodejs_compat"]
 # tests name the backend they exercise, which a default-only allowlist would reject.
 [vars]
 ALLOWED_MODELS = "m2m100,llama-3.1-8b,llama-3.2-3b,llama-3.3-70b,llama-4-scout,gemma-3-12b,mistral-small-3.1"
+
+# The daily cap's counter, bound so the suite exercises the real Durable Object
+# rather than a mock of the thing under test. DAILY_ENTRY_BUDGET is deliberately
+# unset: a bound counter with no budget must do no capping, so every test that
+# does not opt in keeps running against an uncapped Worker.
+[[durable_objects.bindings]]
+name = "DAILY_SPEND"
+class_name = "DailySpendCounter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DailySpendCounter"]

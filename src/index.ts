@@ -1,3 +1,5 @@
+import { DurableObject } from "cloudflare:workers";
+
 export interface Env {
 	AI: Pick<Ai, 'run'>;
 	// Comma-separated list of browser origins allowed to read responses.
@@ -12,6 +14,12 @@ export interface Env {
 	// Optional per-IP burst limiter. Absent means no limiting, which is what a private
 	// single-user deployment wants; the public deployments bind it in wrangler.toml.
 	RATE_LIMITER?: RateLimit;
+	// Optional deployment-wide daily spend cap, counted in entries sent to the model.
+	// Both halves are needed to cap: an unbound counter or an unset budget means no
+	// capping at all, which is what the personal instance wants, exactly as for
+	// RATE_LIMITER above.
+	DAILY_SPEND?: DurableObjectNamespace<DailySpendCounter>;
+	DAILY_ENTRY_BUDGET?: string;
 }
 
 export interface Segment {
@@ -214,6 +222,117 @@ async function isRateLimited(request: Request, env: Env): Promise<boolean> {
 	}
 }
 
+// Cloudflare's Neuron allocation resets at 00:00 UTC, so the cap uses the same
+// boundary. Any other window would leave hours where this Worker still refuses
+// requests against an allocation that has already refilled, or vice versa.
+function utcDate(now: Date): string {
+	return now.toISOString().slice(0, 10);
+}
+
+function secondsUntilUtcMidnight(now: Date): number {
+	// Day + 1 rather than string arithmetic, so month and year ends are the runtime's
+	// problem rather than ours.
+	const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+	// Floored at one second: a Retry-After of 0 invites an immediate retry that is
+	// still over budget.
+	return Math.max(1, Math.ceil((midnight - now.getTime()) / 1000));
+}
+
+interface DailyUsage {
+	date: string;
+	entries: number;
+}
+
+const USAGE_KEY = "usage";
+
+// A single well-known object, because the cap is deployment-wide: every request has
+// to land on the same counter or there is no ceiling, only several smaller ones.
+export const SPEND_COUNTER_NAME = "global";
+
+// Holds one day's entry count. A Durable Object rather than KV because KV's
+// eventually-consistent writes lose concurrent increments, so the count would drift
+// low exactly when traffic is heavy enough for a cap to matter -- undermining the one
+// property the cap exists to provide. One object for the whole Worker is affordable
+// here: this endpoint is not high-throughput, and if it ever were, that is itself the
+// condition the cap should be catching.
+export class DailySpendCounter extends DurableObject {
+	// The date is supplied by the caller rather than read here, so the check and the
+	// charge for one request cannot straddle midnight, and so a rollover is testable
+	// without waiting for one.
+	async spent(date: string): Promise<number> {
+		const usage = await this.ctx.storage.get<DailyUsage>(USAGE_KEY);
+		// Rolling over on read rather than on an alarm: correct even when the Worker is
+		// idle across midnight, and there is no timer to lose.
+		return usage?.date === date ? usage.entries : 0;
+	}
+
+	async charge(date: string, entries: number): Promise<number> {
+		const total = await this.spent(date) + entries;
+		await this.ctx.storage.put<DailyUsage>(USAGE_KEY, { date, entries: total });
+		return total;
+	}
+}
+
+// Null means "do not cap". A budget that does not parse is treated the same way and
+// logged: refusing every request because a var was mistyped would be a worse failure
+// than not capping.
+function dailyEntryBudget(env: Env): number | null {
+	if (!env.DAILY_SPEND || !env.DAILY_ENTRY_BUDGET) {
+		return null;
+	}
+
+	const budget = Number(env.DAILY_ENTRY_BUDGET);
+	if (!Number.isFinite(budget) || budget < 0) {
+		logError("daily_budget_misconfigured", { value: env.DAILY_ENTRY_BUDGET });
+		return null;
+	}
+
+	return Math.floor(budget);
+}
+
+function spendCounter(env: Env): DurableObjectStub<DailySpendCounter> {
+	const namespace = env.DAILY_SPEND as DurableObjectNamespace<DailySpendCounter>;
+	return namespace.get(namespace.idFromName(SPEND_COUNTER_NAME));
+}
+
+// Checked before translating, charged after, because what a request costs is not
+// known until it has run. The day's last request can therefore overshoot the budget
+// by its own size; pre-authorising to avoid that would need a reservation protocol
+// and a way to release reservations, which nothing here justifies.
+async function isOverDailyBudget(env: Env, now: Date): Promise<boolean> {
+	const budget = dailyEntryBudget(env);
+	if (budget === null) {
+		return false;
+	}
+
+	try {
+		return await spendCounter(env).spent(utcDate(now)) >= budget;
+	} catch (error) {
+		// A counter that is failing is not a reason to refuse translations, exactly as
+		// for the burst limiter: log it and let the request through rather than turning
+		// an internal fault into an outage.
+		logError("daily_budget_check_error", {
+			error: error instanceof Error ? error.message : String(error)
+		});
+		return false;
+	}
+}
+
+async function chargeDailyBudget(env: Env, entries: number, now: Date): Promise<void> {
+	if (entries <= 0 || dailyEntryBudget(env) === null) {
+		return;
+	}
+
+	try {
+		await spendCounter(env).charge(utcDate(now), entries);
+	} catch (error) {
+		logError("daily_budget_charge_error", {
+			entries,
+			error: error instanceof Error ? error.message : String(error)
+		});
+	}
+}
+
 // Structured logging helper for better observability
 function logError(event: string, details: Record<string, unknown>): void {
 	console.error(JSON.stringify({
@@ -254,9 +373,23 @@ export default {
 			);
 		}
 
+		// Checked after the preflight branch for the same reason the burst limiter is: a
+		// capped OPTIONS surfaces as a CORS failure rather than the status meant for the
+		// user. 503 rather than 429 so the frontend can tell this apart from the
+		// per-minute limiter -- "wait a minute and try again" is a lie for the rest of
+		// the day once the budget is gone.
+		const now = new Date();
+		if (await isOverDailyBudget(env, now)) {
+			logError("daily_budget_exhausted", { budget: dailyEntryBudget(env) });
+			return new Response(
+				"This service has used its daily translation budget. Translations resume at 00:00 UTC.",
+				{ status: 503, headers: { ...cors, "Retry-After": String(secondsUntilUtcMidnight(now)) } }
+			);
+		}
+
 		// Applied to every response, including errors: without the allow header the
 		// browser discards the body, so the frontend could not even show the reason.
-		const response = await handleTranslation(request, env);
+		const response = await handleTranslation(request, env, now);
 		for (const [name, value] of Object.entries(cors)) {
 			response.headers.set(name, value);
 		}
@@ -264,7 +397,7 @@ export default {
 	},
 };
 
-async function handleTranslation(request: Request, env: Env): Promise<Response> {
+async function handleTranslation(request: Request, env: Env, now: Date): Promise<Response> {
 	if (request.method !== "POST") {
 		return new Response("Invalid request method. Use POST.", { status: 405 });
 	}
@@ -325,6 +458,17 @@ async function handleTranslation(request: Request, env: Env): Promise<Response> 
 	if (attemptedEntries > 0 && serviceErrors === attemptedEntries) {
 		return new Response("Translation service error: no entries could be translated.", { status: 500 });
 	}
+
+	// Charged here rather than in the fetch handler because this is where the cost is
+	// known, and after the service-error check because a request whose every call threw
+	// spent nothing -- letting an outage burn the day's budget would keep users refused
+	// after the model came back. Requests rejected above never reach this line, so a
+	// bad language or an oversized file costs nothing.
+	//
+	// Awaited rather than deferred to waitUntil: a write that landed after the next
+	// request's check would let the cap be overrun by exactly the burst it exists to
+	// stop.
+	await chargeDailyBudget(env, attemptedEntries, now);
 
 	const filename = `messages_${languageCode}.properties`;
 
@@ -1243,5 +1387,6 @@ export {
 	parseFirstLine,
 	parseContinuationLine,
 	lineHasContinuation,
+	secondsUntilUtcMidnight,
 	SUPPORTED_LANGUAGES
 };

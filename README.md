@@ -164,9 +164,47 @@ not a reason to refuse translations.
 
 **This is burst protection, not a spending cap.** The window maxes out at 60 seconds
 and the counters are per Cloudflare location rather than global, so a client spread
-across locations gets proportionally more than the configured limit. Capping a day's
-spend needs a durable counter (KV, D1 or a Durable Object) keyed by date, or
-account-level billing controls.
+across locations gets proportionally more than the configured limit. The daily spend
+cap below is what actually bounds a day's spend.
+
+### Daily Spend Cap
+
+A deployment-wide ceiling on how many entries are sent to the model per UTC day.
+Configure both halves in `wrangler.toml`:
+
+```toml
+[vars]
+DAILY_ENTRY_BUDGET = "20000"   # entries per UTC day, not requests
+
+[[durable_objects.bindings]]
+name = "DAILY_SPEND"
+class_name = "DailySpendCounter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DailySpendCounter"]
+```
+
+Omit either half and no capping happens, which is what the single-user personal
+instance wants. Named environments inherit neither vars nor migrations, so each one
+that wants a cap repeats all three blocks.
+
+The unit is entries rather than requests because that is what cost scales with: a
+3,000-entry upload would otherwise count the same as a three-line file. Comments and
+blank lines are never sent to the model and so are never charged, and neither is a
+request rejected for a bad language code, an oversized file, or one where every call
+to the model failed.
+
+Once the budget is spent the Worker answers `503` with a `Retry-After` pointing at
+the next UTC midnight — deliberately distinct from the rate limiter's `429`, so
+"wait a minute and try again" is never shown for a limit that lasts the rest of the
+day. The window matches Cloudflare's Neuron allocation, which also resets at 00:00
+UTC.
+
+The budget is checked before a request runs and charged after it finishes, because
+what a request costs is not known until then; the day's last request can therefore
+overshoot by its own size. A counter that errors fails open and logs, exactly as the
+rate limiter does.
 
 ### Deploying to Cloudflare Pages
 
