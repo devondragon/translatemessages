@@ -3,6 +3,12 @@ export interface Env {
 	// Comma-separated list of browser origins allowed to read responses.
 	// Set in wrangler.toml under [vars]; falls back to DEFAULT_ALLOWED_ORIGINS.
 	ALLOWED_ORIGINS?: string;
+	// Translation model used when the request does not name one.
+	// Falls back to FALLBACK_MODEL if unset or unrecognised.
+	DEFAULT_MODEL?: string;
+	// Comma-separated models a client may request by name. Unset means only
+	// DEFAULT_MODEL, which keeps a public endpoint off the expensive ones.
+	ALLOWED_MODELS?: string;
 }
 
 export interface Segment {
@@ -78,7 +84,33 @@ const TRANSLATION_MODELS = {
 
 export type ModelChoice = keyof typeof TRANSLATION_MODELS;
 export const MODEL_CHOICES = Object.keys(TRANSLATION_MODELS) as ModelChoice[];
-const DEFAULT_MODEL: ModelChoice = "m2m100";
+
+// Used when DEFAULT_MODEL is unset or names a model that no longer exists, so a
+// mistyped var degrades to a working deployment rather than a broken one.
+// llama-3.1-8b measurably beats m2m100 on wording quality and is the only candidate
+// that also costs less, once batched -- see docs/model-comparison/.
+const FALLBACK_MODEL: ModelChoice = "llama-3.1-8b";
+
+function isModelChoice(value: string): value is ModelChoice {
+	return (MODEL_CHOICES as string[]).includes(value);
+}
+
+function defaultModel(env: Env): ModelChoice {
+	return env.DEFAULT_MODEL && isModelChoice(env.DEFAULT_MODEL) ? env.DEFAULT_MODEL : FALLBACK_MODEL;
+}
+
+// Which models a client may ask for by name. Unset means only this deployment's
+// default, so a public unauthenticated endpoint cannot be steered onto an expensive
+// model -- llama-3.3-70b costs roughly 5.7x the default per token, and nothing else
+// here rate-limits anyone. Deployments that want the full registry, such as the
+// staging instance the comparison harness drives, opt in explicitly.
+function selectableModels(env: Env): ModelChoice[] {
+	if (!env.ALLOWED_MODELS) {
+		return [defaultModel(env)];
+	}
+	const configured = env.ALLOWED_MODELS.split(",").map(entry => entry.trim()).filter(isModelChoice);
+	return configured.length > 0 ? configured : [defaultModel(env)];
+}
 
 function usesInstructPrompting(model: ModelChoice): boolean {
 	return TRANSLATION_MODELS[model].kind === "instruct";
@@ -123,9 +155,12 @@ function isOriginAllowed(origin: string, env: Env): boolean {
 	if (LOCAL_ORIGIN_REGEX.test(origin)) {
 		return true;
 	}
-	const configured = env.ALLOWED_ORIGINS
-		? env.ALLOWED_ORIGINS.split(",").map(entry => entry.trim()).filter(Boolean)
-		: DEFAULT_ALLOWED_ORIGINS;
+	// Unset means "use the built-in list"; set-but-empty means "allow no browser
+	// origin at all", which is what a CLI-only deployment wants. Treating the empty
+	// string as unset would silently hand it the public demo's origin instead.
+	const configured = env.ALLOWED_ORIGINS === undefined
+		? DEFAULT_ALLOWED_ORIGINS
+		: env.ALLOWED_ORIGINS.split(",").map(entry => entry.trim()).filter(Boolean);
 	return configured.includes(origin);
 }
 
@@ -221,13 +256,14 @@ async function handleTranslation(request: Request, env: Env): Promise<Response> 
 		return new Response(`Unsupported language code: ${language}. Supported languages: ${SUPPORTED_LANGUAGES.join(", ")}`, { status: 400 });
 	}
 
-	// EXPERIMENTAL, and absent from the frontend on purpose: this exists so the two
-	// backends can be compared on identical input. Omitting it keeps today's behaviour.
+	// Absent from the frontend on purpose. The CLI and the comparison harness use it;
+	// omitting it gives the deployment's configured default.
+	const selectable = selectableModels(env);
 	const modelEntry = formData.get("model");
-	if (modelEntry !== null && (typeof modelEntry !== "string" || !MODEL_CHOICES.includes(modelEntry as ModelChoice))) {
-		return new Response(`Unsupported model. Choose one of: ${MODEL_CHOICES.join(", ")}.`, { status: 400 });
+	if (modelEntry !== null && (typeof modelEntry !== "string" || !selectable.includes(modelEntry as ModelChoice))) {
+		return new Response(`Unsupported model. Choose one of: ${selectable.join(", ")}.`, { status: 400 });
 	}
-	const model = (modelEntry as ModelChoice | null) ?? DEFAULT_MODEL;
+	const model = (modelEntry as ModelChoice | null) ?? defaultModel(env);
 
 	const text = await file.text();
 

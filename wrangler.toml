@@ -13,6 +13,10 @@ enabled = true
 # so this has no effect on cli/translate_messages.rb or curl.
 [vars]
 ALLOWED_ORIGINS = "https://translatemessages.pages.dev"
+# ALLOWED_MODELS is deliberately unset here, which limits this public endpoint to
+# DEFAULT_MODEL alone. Nothing rate-limits it, and llama-3.3-70b costs roughly 5.7x
+# the default per token, so clients must not be able to pick the model.
+DEFAULT_MODEL = "llama-3.1-8b"
 
 # The production custom domain (translatemessages.justblackmagic.com) is currently
 # configured in the Cloudflare dashboard rather than here, so it cannot be
@@ -132,9 +136,32 @@ name = "translatemessages-staging"
 [env.staging.ai]
 binding = "AI"
 
-# Named environments do not inherit top-level [vars], so this must be repeated.
+# Named environments do not inherit top-level [vars], so these must be repeated.
+# Staging offers the whole registry because scripts/compare-models.mjs drives it.
 [env.staging.vars]
 ALLOWED_ORIGINS = "https://translatemessages.pages.dev"
+DEFAULT_MODEL = "llama-3.1-8b"
+ALLOWED_MODELS = "m2m100,llama-3.1-8b,llama-3.2-3b,llama-3.3-70b,llama-4-scout,gemma-3-12b,mistral-small-3.1"
+
+# Personal instance. Defaults to llama-4-scout, which measured best on wording
+# quality and is roughly 3x faster than the default, at about 3.3x the token cost --
+# a fine trade on a private endpoint with one user, and a poor one on a public
+# endpoint with no rate limiting. Deploy with: wrangler deploy --env personal
+[env.personal]
+name = "translatemessages-personal"
+
+[env.personal.ai]
+binding = "AI"
+
+[env.personal.observability]
+enabled = true
+
+[env.personal.vars]
+DEFAULT_MODEL = "llama-4-scout"
+ALLOWED_MODELS = "m2m100,llama-3.1-8b,llama-3.2-3b,llama-3.3-70b,llama-4-scout,mistral-small-3.1"
+# No browser origin is allowed: this instance is for the CLI, which sends no Origin
+# header and is unaffected by CORS. Add one here if you ever point a page at it.
+ALLOWED_ORIGINS = ""
 
 [env.staging.observability]
 enabled = true

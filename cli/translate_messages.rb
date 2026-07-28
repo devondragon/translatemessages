@@ -12,6 +12,13 @@ WORKER_URL = ENV['WORKER_URL'] || "https://your-worker-url.workers.dev"
 # Default languages to translate to
 DEFAULT_LANGUAGES = ["fr", "es", "de"]
 
+# Optional translation model. Left unset, the Worker uses whatever its deployment
+# defaults to. A personal instance deployed with `wrangler deploy --env personal`
+# already defaults to llama-4-scout, so this only needs setting when pointing the
+# CLI at an instance whose default you want to override -- and the instance must
+# list the model in ALLOWED_MODELS or it will answer 400.
+MODEL = ENV['MODEL']
+
 # Parse command-line arguments
 options = {}
 OptionParser.new do |opts|
@@ -24,6 +31,10 @@ OptionParser.new do |opts|
   opts.on("-l", "--languages LANGUAGES", "Specify a comma-separated list of target languages (e.g., fr,es,de)") do |langs|
 	options[:languages] = langs.split(",")
   end
+
+  opts.on("-m", "--model MODEL", "Translation model to request (e.g., llama-4-scout). Defaults to the Worker's own default.") do |m|
+	options[:model] = m
+  end
 end.parse!
 
 # Set the file to upload (default to messages.properties)
@@ -32,8 +43,11 @@ file_to_upload = options[:file] || "messages.properties"
 # Set the languages to translate to (default to DEFAULT_LANGUAGES)
 languages = options[:languages] || DEFAULT_LANGUAGES
 
+# Set the model, if any. Nil means "let the Worker decide".
+model = options[:model] || MODEL
+
 # Upload file and download translated files
-def translate_and_download(file, languages)
+def translate_and_download(file, languages, model)
   uri = URI(WORKER_URL)
   puts "URI: #{uri}"
 
@@ -46,12 +60,17 @@ def translate_and_download(file, languages)
 	# Record start time
 	start_time = Time.now
 
-	# Prepare the request
-	request = Net::HTTP::Post::Multipart.new uri,
+	# Prepare the request. The model field is omitted entirely when not set, so the
+	# Worker applies its own default rather than being pinned by the client.
+	fields = {
 	  "file" => UploadIO.new(file, "text/plain"),
 	  "language" => language
+	}
+	fields["model"] = model if model && !model.empty?
 
-	puts "Translating to #{language}..."
+	request = Net::HTTP::Post::Multipart.new uri, fields
+
+	puts "Translating to #{language}#{model ? " using #{model}" : ""}..."
 
 	# Perform the request with increased read timeout
 	port = uri.port || (uri.scheme == 'https' ? 443 : 80)
@@ -85,4 +104,4 @@ unless File.exist?(file_to_upload)
 end
 
 # Create translations and download them
-translate_and_download(file_to_upload, languages)
+translate_and_download(file_to_upload, languages, model)
