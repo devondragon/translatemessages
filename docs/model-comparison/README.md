@@ -87,9 +87,41 @@ opt-in and not reachable from the frontend.
 
 ## Cost
 
-Not settled. `llama-3-8b-instruct-awq`, the original candidate, was deprecated on
-2026-05-30 and now returns error 5028 — the generated `worker-configuration.d.ts`
-still lists it, so the types gave no warning. Cloudflare's docs do not publish unit
-pricing for the exact IDs that work today (`llama-3.1-8b-instruct-fp8`,
-`llama-4-scout-17b-16e-instruct`, `mistral-small-3.1-24b-instruct`), so read those
-off the dashboard rather than extrapolating from the non-fp8 variants.
+From <https://developers.cloudflare.com/workers-ai/platform/pricing/>, read
+2026-07-27. Workers AI bills $0.011 per 1,000 Neurons with 10,000 Neurons free per
+day. Per million tokens:
+
+| Model | Input | Output |
+|---|---|---|
+| m2m100-1.2b | $0.342 | $0.342 |
+| llama-3.2-3b-instruct | $0.051 | $0.335 |
+| llama-3.1-8b-instruct-fp8 | $0.152 | $0.287 |
+| llama-4-scout-17b-16e-instruct | $0.270 | $0.850 |
+| mistral-small-3.1-24b-instruct | $0.351 | $0.555 |
+| llama-3.3-70b-instruct-fp8-fast | $0.293 | $2.253 |
+
+Applied to the 373-entry file used above (~8.9k input / ~10.2k output tokens, a
+Latin-script target, ~105-token system prompt for the instruct models), the cost of
+translating the whole file once:
+
+| Model | 1 entry/call | 50 entries/call | vs m2m100 |
+|---|---|---|---|
+| m2m100 | $0.0065 | n/a — cannot batch | 1.00x |
+| llama-3.2-3b | $0.0059 | $0.0039 | 0.90x / 0.60x |
+| llama-3.1-8b | $0.0102 | $0.0044 | 1.57x / **0.68x** |
+| llama-4-scout | $0.0216 | $0.0113 | 3.32x / 1.73x |
+| mistral-small-3.1 | $0.0225 | $0.0091 | 3.45x / 1.39x |
+| llama-3.3-70b | $0.0370 | $0.0258 | 5.68x / 3.96x |
+
+Two things follow.
+
+**Only llama-3.1-8b is cheaper than m2m100, and only when batched.** An earlier note
+in this repo claimed instruct models would generally undercut m2m100 once batched;
+that was extrapolated from `llama-3-8b-instruct-awq`, which was deprecated on
+2026-05-30 mid-experiment. It holds for llama-3.1-8b and not for llama-4-scout.
+
+**The absolute numbers are trivial and the free tier is the real constraint.** Two
+cents translates an entire application's messages file. But 10,000 Neurons/day is
+about $0.11 of usage, which is roughly 17 full-file translations per day on m2m100
+against 5 on llama-4-scout — worth weighing for a public demo, where request volume
+rather than unit price decides the bill.
