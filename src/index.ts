@@ -661,7 +661,14 @@ function splitInlineComment(valuePortion: string): { content: string; inlineComm
 
 		if (!escaped && (char === "#" || char === "!")) {
 			const prevChar = i === 0 ? "" : valuePortion[i - 1];
-			if (i === 0 || /\s/.test(prevChar)) {
+			// #{...} is a JSF/Spring EL expression, not a comment. Treating it as one
+			// silently dropped everything from the expression onward: a value starting
+			// with #{...} was never translated at all, and one containing it mid-string
+			// was translated only up to that point, leaving the tail in English with no
+			// failure reported. Measured on a real JSF messages file, that hit 5 of 373
+			// entries -- including a legal privacy string.
+			const startsElExpression = char === "#" && valuePortion[i + 1] === "{";
+			if (!startsElExpression && (i === 0 || /\s/.test(prevChar))) {
 				return {
 					content: valuePortion.slice(0, i),
 					inlineComment: valuePortion.slice(i),
