@@ -17,6 +17,28 @@ ALLOWED_ORIGINS = "https://translatemessages.pages.dev"
 # DEFAULT_MODEL alone. Nothing rate-limits it, and llama-3.3-70b costs roughly 5.7x
 # the default per token, so clients must not be able to pick the model.
 DEFAULT_MODEL = "llama-3.1-8b"
+# Entries -- not requests -- this deployment will send to the model per UTC day.
+# Requests are refused with a 503 once it is used up, until the window rolls over.
+# 20,000 is roughly 53 files the size of the 373-entry sample in
+# docs/model-comparison/, which at about $0.0044 each caps a runaway day near $0.23.
+# That deliberately exceeds the ~10,000 Neuron free allocation: the free tier is
+# about 25 files, which is too mean for a public demo, and the overage is small
+# enough to absorb. The unit is entries because that is what the cost scales with --
+# counting requests would let one 3,000-entry upload spend the day and report one.
+DAILY_ENTRY_BUDGET = "20000"
+
+# Backs DAILY_ENTRY_BUDGET. A Durable Object rather than KV so concurrent increments
+# serialise instead of overwriting each other, which is the whole point: a counter
+# that undercounts under load fails exactly when the cap matters.
+[[durable_objects.bindings]]
+name = "DAILY_SPEND"
+class_name = "DailySpendCounter"
+
+# SQLite-backed because that is the only option for new classes on the free plan.
+# Environments do not inherit migrations, so staging repeats this block.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DailySpendCounter"]
 
 # Per-IP burst protection for the public endpoint. Burst only: the binding's window
 # maxes out at 60 seconds and its counters are per Cloudflare location, so this stops
@@ -157,6 +179,21 @@ enabled = true
 ALLOWED_ORIGINS = "https://translatemessages.pages.dev"
 DEFAULT_MODEL = "llama-3.1-8b"
 ALLOWED_MODELS = "m2m100,llama-3.1-8b,llama-3.2-3b,llama-3.3-70b,llama-4-scout,gemma-3-12b,mistral-small-3.1"
+# Smaller than production because staging only has to survive scripts/compare-models.mjs,
+# which spends about 320 entries per run against the 40-entry fixture. 5,000 leaves room
+# for a dozen runs a day while still being a ceiling the harness can actually hit --
+# a cap that is never reached is a cap that is never tested.
+DAILY_ENTRY_BUDGET = "5000"
+
+# Its own counter, on its own object: sharing production's would let the harness
+# spend the public deployment's budget.
+[[env.staging.durable_objects.bindings]]
+name = "DAILY_SPEND"
+class_name = "DailySpendCounter"
+
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["DailySpendCounter"]
 
 # A separate namespace from production, so the comparison harness hitting staging
 # hard cannot consume production's budget for the same IP.
@@ -189,3 +226,7 @@ ALLOWED_MODELS = "m2m100,llama-3.1-8b,llama-3.2-3b,llama-3.3-70b,llama-4-scout,m
 ALLOWED_ORIGINS = ""
 # Deliberately no [[ratelimits]] binding: one known user, and the code treats a
 # missing binding as "do not limit". Add one if this URL ever gets shared.
+# Same reasoning for the daily spend cap: no DAILY_SPEND binding and no
+# DAILY_ENTRY_BUDGET, which the code treats as "do not cap". The spend here is one
+# person's own, and a cap that locked them out until midnight would be all cost and
+# no benefit. Add both if this URL ever gets shared.

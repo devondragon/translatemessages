@@ -1,7 +1,7 @@
 // test/index.spec.ts
-import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
-import { describe, it, expect, vi } from 'vitest';
-import worker, { type Env } from '../src/index';
+import { env, createExecutionContext, waitOnExecutionContext, runInDurableObject, SELF } from 'cloudflare:test';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import worker, { type Env, type DailySpendCounter, SPEND_COUNTER_NAME, secondsUntilUtcMidnight } from '../src/index';
 
 // For now, you'll need to do something like this to get a correctly-typed
 // `Request` to pass to `worker.fetch()`.
@@ -1250,5 +1250,230 @@ describe('rate limiting', () => {
 		const response = await send(translateRequest(), mockEnv);
 
 		expect(response.status).toBe(200);
+	});
+});
+
+// A global daily ceiling on entries sent to the model. Distinct from the burst
+// limiter above: that one bounds requests per minute per IP, this one bounds the
+// day's spend for the whole deployment. Both bindings are optional, and the
+// personal instance binds neither.
+describe('daily spend cap', () => {
+	const SPEND_COUNTER = env.DAILY_SPEND as DurableObjectNamespace<DailySpendCounter>;
+
+	function counter() {
+		return SPEND_COUNTER.get(SPEND_COUNTER.idFromName(SPEND_COUNTER_NAME));
+	}
+
+	// One object serves the whole deployment, so it also serves every test in this
+	// file. Without the reset each test inherits the previous one's spend and the
+	// order of the file silently decides which assertions hold.
+	beforeEach(async () => {
+		await runInDurableObject(counter(), (_instance, state) => state.storage.deleteAll());
+	});
+
+	// Uses the bound counter rather than a stub: the arithmetic the cap depends on
+	// is the behaviour under test, so mocking it would test the mock.
+	function cappedEnv(budget: string, aiRun?: ReturnType<typeof vi.fn>) {
+		return {
+			...env,
+			AI: { run: aiRun ?? vi.fn().mockResolvedValue({ response: '1. Bonjour\n2. Au revoir\n3. Merci' }) },
+			DAILY_ENTRY_BUDGET: budget
+		} as unknown as Env;
+	}
+
+	function translateRequest(body: FormData) {
+		return new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body,
+			headers: { Origin: 'https://translatemessages.pages.dev' }
+		});
+	}
+
+	async function send(request: Request, mockEnv: Env) {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+		return response;
+	}
+
+	function today() {
+		return new Date().toISOString().slice(0, 10);
+	}
+
+	it('lets a request through when the day has budget left', async () => {
+		const response = await send(translateRequest(buildForm('greeting=Hello\n', 'fr')), cappedEnv('10'));
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe('greeting=Bonjour\n');
+	});
+
+	it('refuses once the budget is spent, without calling the model', async () => {
+		const aiRun = vi.fn();
+		await counter().charge(today(), 10);
+
+		const response = await send(translateRequest(buildForm('greeting=Hello\n', 'fr')), cappedEnv('10', aiRun));
+
+		expect(response.status).toBe(503);
+		// The entire point of the cap is not spending, so a refusal that still called
+		// the model would be worthless.
+		expect(aiRun).not.toHaveBeenCalled();
+	});
+
+	it('names the daily cap in the refusal and points Retry-After at UTC midnight', async () => {
+		await counter().charge(today(), 10);
+
+		const response = await send(translateRequest(buildForm('greeting=Hello\n', 'fr')), cappedEnv('10'));
+
+		const body = await response.text();
+		// The burst limiter says "wait a minute and try again"; repeating that here
+		// would tell the user something untrue for the rest of the day.
+		expect(body).toContain('daily translation budget');
+		expect(body).not.toContain('wait a minute');
+		const retryAfter = Number(response.headers.get('Retry-After'));
+		expect(retryAfter).toBeGreaterThan(0);
+		expect(retryAfter).toBeLessThanOrEqual(86400);
+	});
+
+	it('keeps CORS headers on the refusal', async () => {
+		await counter().charge(today(), 10);
+
+		const response = await send(translateRequest(buildForm('greeting=Hello\n', 'fr')), cappedEnv('10'));
+
+		// Asserted together: a 200 carries the same header, so checking the header
+		// alone would pass even with the cap bypassed entirely.
+		expect(response.status).toBe(503);
+		expect(response.headers.get('Access-Control-Allow-Origin'))
+			.toBe('https://translatemessages.pages.dev');
+	});
+
+	it('charges the entries translated, not one per request', async () => {
+		const file = 'one=Hello\ntwo=Goodbye\nthree=Thanks\n';
+
+		const first = await send(translateRequest(buildForm(file, 'fr')), cappedEnv('3'));
+		const second = await send(translateRequest(buildForm(file, 'fr')), cappedEnv('3'));
+
+		// Three entries exhaust a budget of three. Charging one per request would
+		// leave room here and let the same file through twice more.
+		expect(first.status).toBe(200);
+		expect(second.status).toBe(503);
+		expect(await counter().spent(today())).toBe(3);
+	});
+
+	it('does not charge a request rejected before translation', async () => {
+		const rejected = await send(translateRequest(buildForm('greeting=Hello\n', 'klingon')), cappedEnv('1'));
+
+		expect(rejected.status).toBe(400);
+		// A validation failure spends nothing, so it must not consume the budget the
+		// next caller needs.
+		expect(await counter().spent(today())).toBe(0);
+		const accepted = await send(translateRequest(buildForm('greeting=Hello\n', 'fr')), cappedEnv('1'));
+		expect(accepted.status).toBe(200);
+	});
+
+	it('does not charge a request where every call to the model threw', async () => {
+		const aiRun = vi.fn().mockRejectedValue(new Error('AI service unavailable'));
+
+		const response = await send(translateRequest(buildForm('greeting=Hello\n', 'fr')), cappedEnv('10', aiRun));
+
+		expect(response.status).toBe(500);
+		// Nothing was spent, and charging anyway would let an outage exhaust the day --
+		// leaving users refused after the model came back.
+		expect(await counter().spent(today())).toBe(0);
+	});
+
+	it('starts from zero when the UTC date rolls over', async () => {
+		const stub = counter();
+		await stub.charge('2026-07-27', 5);
+
+		expect(await stub.spent('2026-07-27')).toBe(5);
+		// Cloudflare's Neuron allocation resets at 00:00 UTC. A counter that carried
+		// yesterday's total forward would refuse a day that has its budget back.
+		expect(await stub.spent('2026-07-28')).toBe(0);
+
+		await stub.charge('2026-07-28', 2);
+		expect(await stub.spent('2026-07-28')).toBe(2);
+		expect(await stub.spent('2026-07-27')).toBe(0);
+	});
+
+	it('fails open when the counter errors', async () => {
+		const brokenEnv = {
+			...env,
+			AI: { run: vi.fn().mockResolvedValue({ response: '1. Bonjour' }) },
+			DAILY_ENTRY_BUDGET: '10',
+			DAILY_SPEND: {
+				idFromName: () => 'id',
+				get: () => ({
+					spent: () => Promise.reject(new Error('counter unavailable')),
+					charge: () => Promise.reject(new Error('counter unavailable'))
+				})
+			}
+		} as unknown as Env;
+
+		const response = await send(translateRequest(buildForm('greeting=Hello\n', 'fr')), brokenEnv);
+
+		// A broken counter is not a reason to refuse translations, exactly as for the
+		// burst limiter.
+		expect(response.status).toBe(200);
+	});
+
+	it('does no capping when no counter is bound', async () => {
+		const uncappedEnv = {
+			...env,
+			AI: { run: vi.fn().mockResolvedValue({ response: '1. Bonjour' }) },
+			DAILY_ENTRY_BUDGET: '0',
+			DAILY_SPEND: undefined
+		} as unknown as Env;
+
+		// The personal instance binds no counter; a budget var left behind must not
+		// start capping it.
+		const response = await send(translateRequest(buildForm('greeting=Hello\n', 'fr')), uncappedEnv);
+
+		expect(response.status).toBe(200);
+	});
+
+	it('does no capping when no budget is configured', async () => {
+		const uncappedEnv = {
+			...env,
+			AI: { run: vi.fn().mockResolvedValue({ response: '1. Bonjour' }) }
+		} as unknown as Env;
+		await counter().charge(today(), 1000);
+
+		const response = await send(translateRequest(buildForm('greeting=Hello\n', 'fr')), uncappedEnv);
+
+		expect(response.status).toBe(200);
+	});
+
+	it('does not cap preflight requests', async () => {
+		const spent = vi.fn();
+		const stubbedEnv = {
+			...env,
+			DAILY_ENTRY_BUDGET: '0',
+			DAILY_SPEND: { idFromName: () => 'id', get: () => ({ spent, charge: vi.fn() }) }
+		} as unknown as Env;
+		const request = new IncomingRequest('http://example.com', {
+			method: 'OPTIONS',
+			headers: { Origin: 'https://translatemessages.pages.dev' }
+		});
+
+		const response = await send(request, stubbedEnv);
+
+		// Capping the preflight would surface as a CORS failure rather than the 503
+		// the user should actually see.
+		expect(response.status).toBe(204);
+		expect(spent).not.toHaveBeenCalled();
+	});
+});
+
+describe('secondsUntilUtcMidnight', () => {
+	it('counts a full day at midnight', () => {
+		expect(secondsUntilUtcMidnight(new Date('2026-07-27T00:00:00Z'))).toBe(86400);
+	});
+
+	it('counts the remainder late in the day', () => {
+		expect(secondsUntilUtcMidnight(new Date('2026-07-27T23:59:30Z'))).toBe(30);
+	});
+
+	it('never reports zero, so Retry-After always names a future moment', () => {
+		expect(secondsUntilUtcMidnight(new Date('2026-07-27T23:59:59.500Z'))).toBeGreaterThan(0);
 	});
 });
