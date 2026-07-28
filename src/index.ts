@@ -316,27 +316,107 @@ async function translateMessages(text: string, targetLanguage: string, env: Env,
 	// comment-heavy file look like a total translation failure.
 	let attemptedEntries = 0;
 
-	for (let i = 0; i < entries.length; i += BATCH_SIZE) {
-		const batch = entries.slice(i, i + BATCH_SIZE);
-		const translationPromises = batch.map(async (entry) => {
-			const entryLines = entry.indexes.map((idx) => lines[idx]);
-			const { translatedLines: translatedEntryLines, failed, attempted, serviceError } = await translateEntry(entryLines, targetLanguage, env, model);
-			return { entry, translatedEntryLines, failed, attempted, serviceError };
+	const record = (entry: { indexes: number[] }, result: EntryTranslationResult) => {
+		if (result.attempted) {
+			attemptedEntries++;
+		}
+		if (result.failed) {
+			failedEntries++;
+		}
+		if (result.serviceError) {
+			serviceErrors++;
+		}
+		entry.indexes.forEach((lineIndex, idx) => {
+			translatedLines[lineIndex] = result.translatedLines[idx];
 		});
-		const batchResults = await Promise.all(translationPromises);
-		for (const { entry, translatedEntryLines, failed, attempted, serviceError } of batchResults) {
-			if (attempted) {
-				attemptedEntries++;
+	};
+
+	// An instruction-following model can translate many entries in one call, which is
+	// where the cost saving lives: the system prompt is several times the size of a
+	// typical entry, so sending it once per entry dominates the bill. A seq2seq model
+	// has no way to be told about several strings at once, so it stays one per call.
+	const units = entries.map(entry => ({
+		entry,
+		entryLines: entry.indexes.map(idx => lines[idx])
+	}));
+
+	if (usesInstructPrompting(model)) {
+		const prepared = units.map(unit => ({ ...unit, prepared: prepareEntry(unit.entryLines, model) }));
+
+		for (const unit of prepared) {
+			if (!unit.prepared) {
+				record(unit.entry, { translatedLines: unit.entryLines, failed: false, attempted: false, serviceError: false });
 			}
-			if (failed) {
-				failedEntries++;
+		}
+
+		const translatable = prepared.filter((unit): unit is typeof unit & { prepared: PreparedEntry } => unit.prepared !== null);
+		const batches: typeof translatable[] = [];
+		for (let i = 0; i < translatable.length; i += BATCH_ENTRIES) {
+			batches.push(translatable.slice(i, i + BATCH_ENTRIES));
+		}
+
+		const settled = await Promise.all(batches.map(async (batch) => {
+			let translations: Array<string | null> | null = null;
+			try {
+				translations = await translateBatch(
+					batch.map(unit => unit.prepared.combinedValue), targetLanguage, env, model
+				);
+			} catch (error) {
+				// A failed batch call is not yet a failed entry: every one of them is
+				// retried individually below, where a genuine outage becomes a service
+				// error and anything transient gets a second chance.
+				logError("batch_translation_failed", {
+					size: batch.length,
+					targetLanguage,
+					error: error instanceof Error ? error.message : String(error)
+				});
 			}
-			if (serviceError) {
-				serviceErrors++;
-			}
-			entry.indexes.forEach((lineIndex, idx) => {
-				translatedLines[lineIndex] = translatedEntryLines[idx];
+
+			return batch.map((unit, idx) => {
+				const translated = translations?.[idx] ?? null;
+				if (translated === null) {
+					return { unit, result: null };
+				}
+				const restored = verifyAndRestore(
+					translated, unit.prepared.maskedSegments, unit.prepared.unescapedValues, false
+				);
+				return { unit, result: restored };
 			});
+		}));
+
+		// Anything the batch did not account for, or returned unusably, is retried on
+		// its own. That path carries the perturbation retry and the same verification,
+		// so batching can only cost an extra call -- never a worse translation.
+		const retries: Array<{ entry: { indexes: number[] }; entryLines: string[] }> = [];
+		for (const batchResults of settled) {
+			for (const { unit, result } of batchResults) {
+				if (result) {
+					record(unit.entry, {
+						translatedLines: assembleEntry(unit.prepared, result),
+						failed: false,
+						attempted: true,
+						serviceError: false
+					});
+				} else {
+					retries.push({ entry: unit.entry, entryLines: unit.entryLines });
+				}
+			}
+		}
+
+		for (let i = 0; i < retries.length; i += BATCH_SIZE) {
+			const slice = retries.slice(i, i + BATCH_SIZE);
+			const results = await Promise.all(
+				slice.map(unit => translateEntry(unit.entryLines, targetLanguage, env, model))
+			);
+			results.forEach((result, idx) => record(slice[idx].entry, result));
+		}
+	} else {
+		for (let i = 0; i < units.length; i += BATCH_SIZE) {
+			const slice = units.slice(i, i + BATCH_SIZE);
+			const results = await Promise.all(
+				slice.map(unit => translateEntry(unit.entryLines, targetLanguage, env, model))
+			);
+			results.forEach((result, idx) => record(slice[idx].entry, result));
 		}
 	}
 
@@ -395,6 +475,86 @@ async function translateWithInstructModel(
 	) as { response?: string };
 
 	return cleanInstructOutput(response.response ?? "");
+}
+
+// Entries per batched call. The system prompt is ~105 tokens against ~24 tokens for
+// a typical entry, so batching is almost entirely about amortising the prompt: 20
+// per call already captures nearly all of the saving that 50 would, and a smaller
+// batch means a mis-formatted reply costs less to redo.
+const BATCH_ENTRIES = 20;
+
+// A batched reply must arrive as "<n>. <translation>" per line, one line per entry
+// sent. Anything else and the batch is discarded and its entries retried singly,
+// which is why a loose parse here would be worse than none.
+const NUMBERED_LINE_REGEX = /^\s*(\d+)\s*[.):]\s?(.*)$/;
+
+function batchSystemPrompt(targetLanguage: string, count: number): string {
+	const languageName = describeLanguage(targetLanguage);
+	return [
+		`You translate strings from a Java .properties file from English into ${languageName}.`,
+		"",
+		`You are given ${count} numbered strings. Reply with exactly ${count} lines.`,
+		"Each line must be the number, a period, a space, then the translation.",
+		"",
+		"Rules:",
+		"- Reply with the numbered translations only. No preamble, no explanation, no notes.",
+		"- Keep one translation per line. Never merge or split lines, never renumber.",
+		"- Copy every placeholder exactly as written, including {0}, {1}, ${name}, %s and %d.",
+		`- Copy any ${SEGMENT_DELIMITER} token exactly; it separates parts of one string.`,
+		`- Copy any ${PLACEHOLDER_MARKER_PREFIX} token followed by digits exactly.`,
+		"- Translate the wording only. Do not add, drop or reorder content."
+	].join("\n");
+}
+
+// Translates several entries in one call. Returns a translation per input, or null
+// for an entry the reply did not cleanly account for; the caller retries those
+// singly rather than guessing. Returns null outright if the reply is unusable.
+async function translateBatch(
+	values: string[],
+	targetLanguage: string,
+	env: Env,
+	model: ModelChoice
+): Promise<Array<string | null> | null> {
+	const numbered = values.map((value, idx) => `${idx + 1}. ${value}`).join("\n");
+
+	const response = await env.AI.run(
+		TRANSLATION_MODELS[model].id,
+		{
+			messages: [
+				{ role: "system", content: batchSystemPrompt(targetLanguage, values.length) },
+				{ role: "user", content: numbered }
+			],
+			temperature: 0,
+			max_tokens: 4096
+		} as never
+	) as { response?: string };
+
+	const reply = (response.response ?? "").trim();
+	if (!reply) {
+		return null;
+	}
+
+	// Indexed by the number the model echoed back, not by line position: a model that
+	// drops line 7 must not silently shift every translation after it up by one.
+	const byIndex = new Map<number, string>();
+	for (const line of reply.split(/\r?\n/)) {
+		const match = line.match(NUMBERED_LINE_REGEX);
+		if (!match) {
+			continue;
+		}
+		const index = Number(match[1]);
+		// First occurrence wins; a repeated number means the reply is confused about
+		// the mapping, so trusting the later one would be arbitrary.
+		if (index >= 1 && index <= values.length && !byIndex.has(index)) {
+			byIndex.set(index, match[2].trim());
+		}
+	}
+
+	if (byIndex.size === 0) {
+		return null;
+	}
+
+	return values.map((_, idx) => byIndex.get(idx + 1) ?? null);
 }
 
 function instructSystemPrompt(targetLanguage: string): string {
@@ -462,6 +622,17 @@ async function translateSegments(
 	env: Env
 ): Promise<string[] | null> {
 	const translatedCombined = await translateText(combinedValue, targetLanguage, env, model);
+	return verifyAndRestore(translatedCombined, maskedSegments, sourceValues, stripTrailingTerminator);
+}
+
+// The half of an attempt that does not talk to the model, split out so a batched
+// call can apply exactly the same checks per entry as a single call does.
+function verifyAndRestore(
+	translatedCombined: string,
+	maskedSegments: MaskedSegment[],
+	sourceValues: string[],
+	stripTrailingTerminator: boolean
+): string[] | null {
 	const translatedSegments = translatedCombined.split(SEGMENT_DELIMITER).map(normalizeMarkers);
 
 	if (translatedSegments.length !== maskedSegments.length) {
@@ -535,30 +706,42 @@ interface EntryTranslationResult {
 	serviceError: boolean;
 }
 
-async function translateEntry(lines: string[], targetLanguage: string, env: Env, model: ModelChoice): Promise<EntryTranslationResult> {
+// Everything an entry needs before anyone talks to a model. Split out so a batched
+// call and a single call share exactly one notion of what is translatable and how it
+// is masked -- two notions would drift.
+interface PreparedEntry {
+	lines: string[];
+	segments: Segment[];
+	maskedSegments: MaskedSegment[];
+	unescapedValues: string[];
+	combinedValue: string;
+}
+
+// Null when the entry is not translatable at all: a comment, a blank, an unparseable
+// line, an empty value, or one carrying text that collides with an internal marker.
+function prepareEntry(lines: string[], model: ModelChoice): PreparedEntry | null {
 	const firstLine = lines[0];
 	const trimmedFirstLine = firstLine.trim();
 
 	if (!trimmedFirstLine || trimmedFirstLine.startsWith("#") || trimmedFirstLine.startsWith("!")) {
-		return { translatedLines: lines, failed: false, attempted: false, serviceError: false };
+		return null;
 	}
 
 	const segments: Segment[] = [];
 	const firstSegment = parseFirstLine(firstLine);
 	if (!firstSegment) {
-		return { translatedLines: lines, failed: false, attempted: false, serviceError: false };
+		return null;
 	}
 	segments.push(firstSegment);
 
 	for (let i = 1; i < lines.length; i++) {
-		const segment = parseContinuationLine(lines[i]);
-		segments.push(segment);
+		segments.push(parseContinuationLine(lines[i]));
 	}
 
 	const unescapedValues = segments.map(segment => unescapePropertiesText(segment.value));
 
 	if (unescapedValues.every(value => value === "")) {
-		return { translatedLines: lines, failed: false, attempted: false, serviceError: false };
+		return null;
 	}
 
 	// Source text containing either internal marker would survive the round trip and
@@ -567,7 +750,7 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env,
 	// restorePlaceholders into whatever placeholder happened to take that index.
 	// Leaving such entries untranslated is the safe outcome.
 	if (unescapedValues.some(value => value.includes(SEGMENT_DELIMITER) || value.includes(PLACEHOLDER_MARKER_PREFIX))) {
-		return { translatedLines: lines, failed: false, attempted: false, serviceError: false };
+		return null;
 	}
 
 	const placeholderCounter = { current: 0 };
@@ -576,6 +759,23 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env,
 	// left that word untranslated. Continuation values already end with a space
 	// before their backslash, so the left-hand side needs no padding.
 	const combinedValue = maskedSegments.map(segment => segment.text).join(`${SEGMENT_DELIMITER} `);
+
+	return { lines, segments, maskedSegments, unescapedValues, combinedValue };
+}
+
+function assembleEntry(prepared: PreparedEntry, restoredValues: string[]): string[] {
+	return prepared.segments.map((segment, idx) =>
+		`${segment.prefix}${escapePropertiesText(restoredValues[idx])}${segment.suffix}`
+	);
+}
+
+async function translateEntry(lines: string[], targetLanguage: string, env: Env, model: ModelChoice): Promise<EntryTranslationResult> {
+	const prepared = prepareEntry(lines, model);
+	if (!prepared) {
+		return { translatedLines: lines, failed: false, attempted: false, serviceError: false };
+	}
+	const { segments, maskedSegments, unescapedValues, combinedValue } = prepared;
+	const firstLine = lines[0];
 
 	try {
 		let restoredValues = await translateSegments(
@@ -600,11 +800,7 @@ async function translateEntry(lines: string[], targetLanguage: string, env: Env,
 			return { translatedLines: lines, failed: true, attempted: true, serviceError: false };
 		}
 
-		const translatedLines = segments.map((segment, idx) => {
-			const escapedValue = escapePropertiesText(restoredValues[idx]);
-			return `${segment.prefix}${escapedValue}${segment.suffix}`;
-		});
-		return { translatedLines, failed: false, attempted: true, serviceError: false };
+		return { translatedLines: assembleEntry(prepared, restoredValues), failed: false, attempted: true, serviceError: false };
 	} catch (error) {
 		logError("entry_translation_failed", {
 			entryKey: firstLine.split(/[=:\s]/)[0]?.trim() || "unknown",

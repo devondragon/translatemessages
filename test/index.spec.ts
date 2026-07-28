@@ -867,7 +867,7 @@ describe('llama backend (experimental)', () => {
 	}
 
 	it('sends placeholders unmasked and keeps them in the output', async () => {
-		const mockRun = vi.fn().mockResolvedValue({ response: 'Bonjour {0}' });
+		const mockRun = vi.fn().mockResolvedValue({ response: '1. Bonjour {0}' });
 
 		const response = await runWith(mockRun, "greeting=Hello {0}\n", 'llama-3.1-8b');
 
@@ -877,19 +877,19 @@ describe('llama backend (experimental)', () => {
 		const [modelId, args] = mockRun.mock.calls[0];
 		expect(modelId).toBe('@cf/meta/llama-3.1-8b-instruct-fp8');
 		// The whole hypothesis: the model sees the real placeholder, not a marker.
-		expect(args.messages[1].content).toBe('Hello {0}');
+		expect(args.messages[1].content).toBe('1. Hello {0}');
 		expect(args.messages[0].content).toContain('{0}');
 	});
 
 	it('defaults to llama-3.1-8b when no model is requested', async () => {
-		const mockRun = vi.fn().mockResolvedValue({ response: 'Bonjour {0}' });
+		const mockRun = vi.fn().mockResolvedValue({ response: '1. Bonjour {0}' });
 
 		const response = await runWith(mockRun, "greeting=Hello {0}\n");
 
 		expect(response.status).toBe(200);
 		expect(mockRun.mock.calls[0][0]).toBe('@cf/meta/llama-3.1-8b-instruct-fp8');
 		// The default no longer masks: the model is asked to copy the placeholder.
-		expect(mockRun.mock.calls[0][1].messages[1].content).toBe('Hello {0}');
+		expect(mockRun.mock.calls[0][1].messages[1].content).toBe('1. Hello {0}');
 	});
 
 	it('honours DEFAULT_MODEL when the deployment sets one', async () => {
@@ -1042,5 +1042,107 @@ describe('llama backend (experimental)', () => {
 		const response = await runWith(mockRun, "greeting=He said \"hello\" {0}\n", 'llama-3.1-8b');
 
 		expect(await response.text()).toBe("greeting=Il a dit \"bonjour\" {0}\n");
+	});
+});
+
+// Batching is where the cost saving lives: the system prompt is several times the
+// size of a typical entry, so sending it once per entry dominates the bill.
+describe('batched translation', () => {
+	function runBatched(mockRun: ReturnType<typeof vi.fn>, content: string) {
+		const mockEnv = { ...env, AI: { run: mockRun } } as unknown as Env;
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm(content, 'fr', 'llama-3.1-8b')
+		});
+		const ctx = createExecutionContext();
+		return worker.fetch(request, mockEnv, ctx).then(async (response) => {
+			await waitOnExecutionContext(ctx);
+			return response;
+		});
+	}
+
+	const THREE = "a=One\nb=Two\nc=Three\n";
+
+	it('translates several entries in a single call', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ response: '1. Un\n2. Deux\n3. Trois' });
+
+		const response = await runBatched(mockRun, THREE);
+
+		expect(await response.text()).toBe("a=Un\nb=Deux\nc=Trois\n");
+		expect(mockRun).toHaveBeenCalledTimes(1);
+		expect(mockRun.mock.calls[0][1].messages[1].content).toBe('1. One\n2. Two\n3. Three');
+	});
+
+	it('maps translations by the number the model returned, not by position', async () => {
+		// A model that drops line 2 must not shift line 3 up into its place.
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ response: '1. Un\n3. Trois' })
+			.mockResolvedValue({ response: 'Deux' });
+
+		const response = await runBatched(mockRun, THREE);
+
+		expect(await response.text()).toBe("a=Un\nb=Deux\nc=Trois\n");
+		// Only the missing entry is retried, not the whole batch.
+		expect(mockRun).toHaveBeenCalledTimes(2);
+	});
+
+	it('retries entries individually when the batch reply is unusable', async () => {
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ response: 'I am afraid I cannot help with that.' })
+			.mockResolvedValue({ response: 'Traduit' });
+
+		const response = await runBatched(mockRun, THREE);
+
+		// Batch discarded, three singles: never a worse translation, only an extra call.
+		expect(await response.text()).toBe("a=Traduit\nb=Traduit\nc=Traduit\n");
+		expect(mockRun).toHaveBeenCalledTimes(4);
+	});
+
+	it('falls back to singles when the batch call throws', async () => {
+		const mockRun = vi.fn()
+			.mockRejectedValueOnce(new Error('AI service blip'))
+			.mockResolvedValue({ response: 'Traduit' });
+
+		const response = await runBatched(mockRun, THREE);
+
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe("a=Traduit\nb=Traduit\nc=Traduit\n");
+		expect(response.headers.get('X-Translation-Failures')).toBeNull();
+	});
+
+	it('still reports 500 when every entry fails at the API', async () => {
+		const mockRun = vi.fn().mockRejectedValue(new Error('AI service unavailable'));
+
+		const response = await runBatched(mockRun, THREE);
+
+		expect(response.status).toBe(500);
+	});
+
+	it('applies placeholder verification to batched results', async () => {
+		// The guard must not be reachable only through the single-entry path.
+		const mockRun = vi.fn()
+			.mockResolvedValueOnce({ response: '1. Bonjour {0} et {0}' })
+			.mockResolvedValue({ response: 'Bonjour {0} et {0}' });
+
+		const response = await runBatched(mockRun, "greeting=Hello {0}\n");
+
+		expect(await response.text()).toBe("greeting=Hello {0}\n");
+		expect(response.headers.get('X-Translation-Failures')).toBe('1');
+	});
+
+	it('does not batch a seq2seq model, which cannot be told about several strings', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ translated_text: 'Traduit' });
+		const mockEnv = { ...env, AI: { run: mockRun } } as unknown as Env;
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm(THREE, 'fr', 'm2m100')
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(mockRun).toHaveBeenCalledTimes(3);
+		expect(mockRun.mock.calls[0][1].text).toBe('One');
 	});
 });
