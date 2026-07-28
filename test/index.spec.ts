@@ -32,6 +32,7 @@ describe('TranslateMessages Worker', () => {
 		const formData = new FormData();
 		// Missing file - only has language
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -70,6 +71,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([largeContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 		
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -88,6 +90,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File(['test=Test'], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'invalid-lang');
+		formData.append('model', 'm2m100');
 		
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -115,6 +118,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File(['test=Test'], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 		
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -144,6 +148,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'FR-ca');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -177,6 +182,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -205,6 +211,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -235,6 +242,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -263,6 +271,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -291,6 +300,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -322,6 +332,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'es');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -359,6 +370,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'es');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -397,6 +409,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -426,6 +439,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -456,6 +470,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -486,6 +501,7 @@ describe('TranslateMessages Worker', () => {
 		const file = new File([fileContent], 'messages.properties', { type: 'text/plain' });
 		formData.append('file', file);
 		formData.append('language', 'fr');
+		formData.append('model', 'm2m100');
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
@@ -519,7 +535,7 @@ describe('TranslateMessages Worker', () => {
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm("greeting=Hello\n", 'fr')
+			body: buildForm("greeting=Hello\n", 'fr', 'm2m100')
 		});
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
@@ -537,7 +553,7 @@ describe('TranslateMessages Worker', () => {
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm("greeting=Hello\nfarewell=Goodbye\n", 'fr')
+			body: buildForm("greeting=Hello\nfarewell=Goodbye\n", 'fr', 'm2m100')
 		});
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
@@ -554,7 +570,7 @@ describe('TranslateMessages Worker', () => {
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm("# just a comment\n", 'fr')
+			body: buildForm("# just a comment\n", 'fr', 'm2m100')
 		});
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
@@ -576,7 +592,7 @@ describe('TranslateMessages Worker', () => {
 		const fileContent = "greeting=Hello {0}\n";
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm(fileContent, 'fr')
+			body: buildForm(fileContent, 'fr', 'm2m100')
 		});
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
@@ -598,7 +614,7 @@ describe('TranslateMessages Worker', () => {
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm("greeting=Hello {0} there\n", 'fr')
+			body: buildForm("greeting=Hello {0} there\n", 'fr', 'm2m100')
 		});
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
@@ -623,7 +639,7 @@ describe('TranslateMessages Worker', () => {
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm("named=Hi {0}\n", 'fr')
+			body: buildForm("named=Hi {0}\n", 'fr', 'm2m100')
 		});
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
@@ -646,7 +662,7 @@ describe('TranslateMessages Worker', () => {
 		const fileContent = "named=Hi {0}.\n";
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm(fileContent, 'fr')
+			body: buildForm(fileContent, 'fr', 'm2m100')
 		});
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
@@ -669,7 +685,7 @@ describe('TranslateMessages Worker', () => {
 
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm("named=Hi {0}\n", 'fr')
+			body: buildForm("named=Hi {0}\n", 'fr', 'm2m100')
 		});
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
@@ -690,7 +706,7 @@ describe('TranslateMessages Worker', () => {
 		const values = Array.from({ length: 12 }, (_, i) => `{${i}}`).join(' ');
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm(`many=${values}\n`, 'fr')
+			body: buildForm(`many=${values}\n`, 'fr', 'm2m100')
 		});
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
@@ -707,7 +723,7 @@ describe('TranslateMessages Worker', () => {
 		const fileContent = "literal=Value with XQZ0 inside\n";
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm(fileContent, 'fr')
+			body: buildForm(fileContent, 'fr', 'm2m100')
 		});
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
@@ -727,7 +743,7 @@ describe('CORS', () => {
 	function translateRequest(origin?: string): Request {
 		return new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm("greeting=Hello\n", 'fr'),
+			body: buildForm("greeting=Hello\n", 'fr', 'm2m100'),
 			...(origin ? { headers: { Origin: origin } } : {})
 		});
 	}
@@ -775,6 +791,15 @@ describe('CORS', () => {
 		expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://example.org');
 	});
 
+	it('allows no browser origin when ALLOWED_ORIGINS is set but empty', async () => {
+		// A CLI-only deployment sets this empty. Treating "" as unset would silently
+		// hand it the public demo's origin instead.
+		const response = await post(translateRequest(ALLOWED), { ALLOWED_ORIGINS: '' });
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get('Access-Control-Allow-Origin')).toBeNull();
+	});
+
 	it('withholds the allow header from unlisted origins', async () => {
 		const response = await post(translateRequest('https://evil.example'));
 
@@ -787,7 +812,7 @@ describe('CORS', () => {
 	it('sends CORS headers on error responses too', async () => {
 		const request = new IncomingRequest('http://example.com', {
 			method: 'POST',
-			body: buildForm("greeting=Hello\n", 'invalid-lang'),
+			body: buildForm("greeting=Hello\n", 'invalid-lang', 'm2m100'),
 			headers: { Origin: ALLOWED }
 		});
 		const response = await post(request);
@@ -856,15 +881,85 @@ describe('llama backend (experimental)', () => {
 		expect(args.messages[0].content).toContain('{0}');
 	});
 
-	it('defaults to m2m100 when no model is requested', async () => {
-		const mockRun = vi.fn().mockResolvedValue({ translated_text: 'Bonjour XQZ0' });
+	it('defaults to llama-3.1-8b when no model is requested', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ response: 'Bonjour {0}' });
 
 		const response = await runWith(mockRun, "greeting=Hello {0}\n");
 
 		expect(response.status).toBe(200);
+		expect(mockRun.mock.calls[0][0]).toBe('@cf/meta/llama-3.1-8b-instruct-fp8');
+		// The default no longer masks: the model is asked to copy the placeholder.
+		expect(mockRun.mock.calls[0][1].messages[1].content).toBe('Hello {0}');
+	});
+
+	it('honours DEFAULT_MODEL when the deployment sets one', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ translated_text: 'Bonjour XQZ0' });
+		const mockEnv = { ...env, AI: { run: mockRun }, DEFAULT_MODEL: 'm2m100' } as unknown as Env;
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm("greeting=Hello {0}\n", 'fr')
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
 		expect(mockRun.mock.calls[0][0]).toBe('@cf/meta/m2m100-1.2b');
-		// Masked, as the default path has always done.
-		expect(mockRun.mock.calls[0][1].text).toBe('Hello XQZ0');
+	});
+
+	it('falls back to a working model when DEFAULT_MODEL is nonsense', async () => {
+		const mockRun = vi.fn().mockResolvedValue({ response: 'Bonjour' });
+		const mockEnv = { ...env, AI: { run: mockRun }, DEFAULT_MODEL: 'gpt-9' } as unknown as Env;
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm("greeting=Hello\n", 'fr')
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		// A mistyped var must degrade to a working deployment, not a broken one.
+		expect(response.status).toBe(200);
+		expect(mockRun.mock.calls[0][0]).toBe('@cf/meta/llama-3.1-8b-instruct-fp8');
+	});
+
+	it('refuses a model the deployment does not offer', async () => {
+		const mockRun = vi.fn();
+		const mockEnv = {
+			...env, AI: { run: mockRun }, ALLOWED_MODELS: 'llama-3.1-8b'
+		} as unknown as Env;
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm("greeting=Hello\n", 'fr', 'llama-3.3-70b')
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		// Nothing rate-limits this endpoint, so a public deployment must not be
+		// steerable onto a model that costs several times the default.
+		expect(response.status).toBe(400);
+		expect(await response.text()).toContain('Unsupported model');
+		expect(mockRun).not.toHaveBeenCalled();
+	});
+
+	it('offers only the default when ALLOWED_MODELS is unset', async () => {
+		const mockRun = vi.fn();
+		const mockEnv = { ...env, AI: { run: mockRun }, ALLOWED_MODELS: undefined } as unknown as Env;
+
+		const request = new IncomingRequest('http://example.com', {
+			method: 'POST',
+			body: buildForm("greeting=Hello\n", 'fr', 'llama-4-scout')
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(400);
+		expect(mockRun).not.toHaveBeenCalled();
 	});
 
 	it('rejects an unknown model', async () => {

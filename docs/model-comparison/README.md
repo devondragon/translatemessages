@@ -13,7 +13,16 @@ node scripts/compare-models.mjs --models m2m100,llama-3.1-8b,llama-4-scout --lan
 
 **Instruction-following models are clearly better on high-resource languages and
 should not be adopted for the full supported-language list without further work.**
-Two defect classes found in the low-resource sweep are not yet guarded against.
+
+Acted on: `llama-3.1-8b` is now the default. It beats m2m100 on wording quality and
+is the only candidate that also costs less once batched. `llama-4-scout` is better
+still on quality and roughly 3x faster, at about 3.3x the token cost, which suits a
+private instance with one user rather than a public endpoint with no rate limiting --
+see `[env.personal]` in `wrangler.toml`.
+
+The two defect classes found in the low-resource sweep are now guarded: invented
+placeholders and leaked model commentary both fail the entry rather than reaching
+the file.
 
 ## High-resource languages (fr, es, de, ja)
 

@@ -4,3 +4,9 @@ name = "translatemessages-test"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
+
+# DEFAULT_MODEL is deliberately left unset so the suite exercises the same fallback
+# production resolves to. ALLOWED_MODELS mirrors the staging posture: the pipeline
+# tests name the backend they exercise, which a default-only allowlist would reject.
+[vars]
+ALLOWED_MODELS = "m2m100,llama-3.1-8b,llama-3.2-3b,llama-3.3-70b,llama-4-scout,gemma-3-12b,mistral-small-3.1"
