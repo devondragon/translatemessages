@@ -129,6 +129,20 @@ in this repo claimed instruct models would generally undercut m2m100 once batche
 that was extrapolated from `llama-3-8b-instruct-awq`, which was deprecated on
 2026-05-30 mid-experiment. It holds for llama-3.1-8b and not for llama-4-scout.
 
+**Batching is implemented** (20 entries per call, instruct models only), so the
+batched column is what production actually pays. Measured on the 373-entry file
+against staging, both at zero reported failures:
+
+| Model | Wall clock, whole file | Notes |
+|---|---|---|
+| llama-3.1-8b (default) | ~50s | ~0.70x m2m100 cost |
+| llama-4-scout (personal) | ~21s | ~1.73x m2m100 cost |
+
+Batching did not improve wall clock for llama-3.1-8b -- each call returns twenty
+translations, so the calls take proportionally longer -- but it cuts the number of
+calls from 373 to about 19, which is where the saving is. If latency matters more
+than cost, llama-4-scout is roughly 2.5x faster.
+
 **The absolute numbers are trivial and the free tier is the real constraint.** Two
 cents translates an entire application's messages file. But 10,000 Neurons/day is
 about $0.11 of usage, which is roughly 17 full-file translations per day on m2m100
